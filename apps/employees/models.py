@@ -2,7 +2,7 @@ from django.db import models
 from django.utils import timezone
 from django.conf import settings
 from django.core.validators import RegexValidator
-
+# from apps.attendance.models import WorkCalendar, Shift
 
 class Employee(models.Model):
 
@@ -68,23 +68,23 @@ class Employee(models.Model):
     # SALARY STRUCTURE
     # ============================================================
 
-    basic_salary = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=0
-    )
+    # basic_salary = models.DecimalField(
+    #     max_digits=12,
+    #     decimal_places=2,
+    #     default=0
+    # )
 
-    allowances = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=0
-    )
+    # allowances = models.DecimalField(
+    #     max_digits=12,
+    #     decimal_places=2,
+    #     default=0
+    # )
 
-    deductions = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=0
-    )
+    # deductions = models.DecimalField(
+    #     max_digits=12,
+    #     decimal_places=2,
+    #     default=0
+    # )
 
     # ============================================================
     # COMPLIANCE (Indian Payroll Ready)
@@ -99,6 +99,9 @@ class Employee(models.Model):
     pt_applicable = models.BooleanField(default=False)
 
     pan = models.CharField(max_length=15, blank=True)
+
+    pf_number = models.CharField(max_length=50, blank=True, null=True)
+    uan_number = models.CharField(max_length=50, blank=True, null=True)
 
     # ============================================================
     # BANK DETAILS
@@ -154,6 +157,22 @@ class Employee(models.Model):
         blank=True
     )
 
+    work_calendar = models.ForeignKey(
+    "attendance.WorkCalendar",
+    on_delete=models.SET_NULL,
+    null=True,
+    blank=True
+)
+
+    shift = models.ForeignKey(
+    "attendance.Shift",
+    on_delete=models.SET_NULL,
+    null=True,
+    blank=True
+)
+
+    is_work_from_home = models.BooleanField(default=False)
+
     # ============================================================
     # TIMESTAMPS
     # ============================================================
@@ -179,7 +198,6 @@ class Employee(models.Model):
             models.Index(fields=["email"]),
             models.Index(fields=["department"]),
         ]
-
 
 # ============================================================
 # EMPLOYEE HISTORY TRACKING

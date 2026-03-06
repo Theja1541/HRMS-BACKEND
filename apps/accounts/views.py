@@ -32,23 +32,11 @@ from apps.attendance.models import Attendance
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login_view(request):
+
     serializer = LoginSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
     user = serializer.validated_data['user']
-
-    # 🔒 Account Lock Check
-    # 🔁 Force Password Change
-    if getattr(user, "must_change_password", False):
-        return Response({
-            "force_password_change": True,
-            "message": "You must change your password before continuing."
-            }, status=status.HTTP_200_OK)
-
-
-    # 🔁 Force Password Change
-    # 🔁 Force Password Change
-    force_password_change = getattr(user, "must_change_password", False)
 
     refresh = RefreshToken.for_user(user)
 
@@ -59,10 +47,26 @@ def login_view(request):
         except:
             employee_profile_id = None
 
+    # 🔒 FORCE PASSWORD CHANGE
+    if getattr(user, "must_change_password", False):
+        return Response({
+            "force_password_change": True,
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+                "employee_profile_id": employee_profile_id
+            }
+        }, status=status.HTTP_200_OK)
+
+    # ✅ NORMAL LOGIN
     return Response({
         "access": str(refresh.access_token),
         "refresh": str(refresh),
-        "force_password_change": force_password_change,
+        "force_password_change": False,
         "user": {
             "id": user.id,
             "username": user.username,

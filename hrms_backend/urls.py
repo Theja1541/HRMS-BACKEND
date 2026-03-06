@@ -42,18 +42,21 @@ def health_check(request):
 urlpatterns = [
     path('', home),
     path('admin/', admin.site.urls),
+
     path('api/test/', api_test),
-    path('api/health/', health_check),  # 👈 ADD THIS
+    path('api/health/', health_check),
+
     path('api/accounts/', include('apps.accounts.urls')),
     path('api/employees/', include('apps.employees.urls')),
-    path('api/payroll/', include('apps.payroll.urls')),
     path('api/attendance/', include('apps.attendance.urls')),
     path('api/leaves/', include('apps.leaves.urls')),
-    path("api/accounts/token/refresh/", TokenRefreshView.as_view()),
     path('api/audit/', include('apps.audit.urls')),
-    path("api/notifications/", include("apps.notifications.urls")),
-    path("api/leaves/", include("apps.leaves.urls")),
+    path('api/notifications/', include('apps.notifications.urls')),
+    path('api/payroll/', include('apps.payroll.urls')),
+
+    path("api/accounts/token/refresh/", TokenRefreshView.as_view()),
 ]
+
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

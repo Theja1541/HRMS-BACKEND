@@ -1,12 +1,25 @@
 from rest_framework import serializers
 from .models import Salary, Payslip
-
+from .models import SalaryRevision
 
 class SalarySerializer(serializers.ModelSerializer):
+
+    yearly_ctc = serializers.SerializerMethodField()
+    yearly_gross = serializers.SerializerMethodField()
+    yearly_net = serializers.SerializerMethodField()
 
     class Meta:
         model = Salary
         fields = "__all__"
+
+    def get_yearly_ctc(self, obj):
+        return obj.ctc * 12
+
+    def get_yearly_gross(self, obj):
+        return obj.gross_salary * 12
+
+    def get_yearly_net(self, obj):
+        return obj.net_salary * 12
 
     def validate_employee(self, value):
         if Salary.objects.filter(employee=value).exists():
@@ -60,3 +73,10 @@ class PayslipSerializer(serializers.ModelSerializer):
             "generated_on",
             "paid_on",
         ]
+
+
+class SalaryRevisionSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = SalaryRevision
+        fields = "__all__"

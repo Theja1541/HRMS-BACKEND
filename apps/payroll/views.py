@@ -699,7 +699,6 @@ from calendar import monthrange
 from apps.attendance.models import Attendance
 from apps.leaves.models import LeaveRequest
 from .models import ProfessionalTaxSlab
-from calendar import monthrange
 from apps.leaves.models import LeaveBalance
 from django.http import HttpResponse
 from decimal import Decimal, ROUND_HALF_UP
@@ -731,9 +730,91 @@ from rest_framework.response import Response
 from rest_framework import status
 from .models import FullFinalSettlement
 from apps.accounts.permissions import IsHR
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from apps.accounts.permissions import IsHR
+from decimal import Decimal
+from apps.employees.models import Employee
+from django.db.models import Sum
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from apps.accounts.permissions import IsEmployee
+# from .models import PayrollRecord
+from django.db.models import Sum
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from apps.accounts.permissions import IsEmployee
+from .models import Payslip
+from calendar import monthrange
+from decimal import Decimal
+from apps.payroll.services.lop_service import calculate_lop_for_month
+from django.http import HttpResponse
+from .utils.payslip_pdf import generate_payslip_pdf
+from .models import Payslip
+from rest_framework.decorators import api_view, permission_classes
+from apps.accounts.permissions import IsEmployee
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from django.db.models import Sum
+from rest_framework.response import Response
+from django.db.models import Sum, Avg, Count
+from .models import Salary
+from openpyxl import Workbook
+from django.http import HttpResponse
+from rest_framework.permissions import IsAuthenticated
+from .models import Salary
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import pagesizes
+from django.db.models import Sum, Avg
+from datetime import datetime
+from .models import Payslip
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle
+)
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import pagesizes
+from reportlab.lib.units import inch
+from django.db.models import Sum
+from django.http import HttpResponse
+from datetime import datetime
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from .models import Payslip
+from .utils.salary_utils import get_current_salary
+from rest_framework.viewsets import ModelViewSet
+from .models import SalaryRevision
+from .serializers import SalaryRevisionSerializer
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from decimal import Decimal
+from .models import SalaryRevision
+from apps.employees.models import Employee
+from apps.payroll.models import Payslip, PayrollMonth
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.db.models import Sum
+from django.utils import timezone
+from .utils.payslip_pdf import generate_payslip_pdf
+
 
 # ============================================================
 # SALARY MANAGEMENT
+# ============================================================
+
+# ============================================================
+# SALARY MANAGEMENT (MULTI-COMPONENT)
 # ============================================================
 
 @api_view(["POST"])
@@ -741,22 +822,50 @@ from apps.accounts.permissions import IsHR
 def set_salary(request):
     employee_id = request.data.get("employee_id")
 
+    if not employee_id:
+        return Response({"error": "employee_id required"}, status=400)
+
     try:
         employee = Employee.objects.get(id=employee_id)
     except Employee.DoesNotExist:
         return Response({"error": "Employee not found"}, status=404)
 
+    # 🔒 STABILITY CHECK — Prevent salary change after payslip exists
+    existing_payslips = Payslip.objects.filter(employee=employee)
+
+    if existing_payslips.exists():
+        return Response(
+            {"error": "Cannot modify salary after payslip generation"},
+            status=400
+        )
+
+    # ✅ Safe to update
     salary, created = Salary.objects.update_or_create(
         employee=employee,
         defaults={
             "basic": Decimal(request.data.get("basic", 0)),
+            "da": Decimal(request.data.get("da", 0)),
             "hra": Decimal(request.data.get("hra", 0)),
-            "allowances": Decimal(request.data.get("allowances", 0)),
-            "deductions": Decimal(request.data.get("deductions", 0)),
+            "conveyance": Decimal(request.data.get("conveyance", 0)),
+            "medical": Decimal(request.data.get("medical", 0)),
+            "special_allowance": Decimal(request.data.get("special_allowance", 0)),
+
+            "employee_pf": Decimal(request.data.get("employee_pf", 0)),
+            "professional_tax": Decimal(request.data.get("professional_tax", 0)),
+            "employee_esi": Decimal(request.data.get("employee_esi", 0)),
+            "tds": Decimal(request.data.get("tds", 0)),
+            "medical_insurance": Decimal(request.data.get("medical_insurance", 0)),
+
+            "employer_pf": Decimal(request.data.get("employer_pf", 0)),
+            "employer_esi": Decimal(request.data.get("employer_esi", 0)),
+            "gratuity": Decimal(request.data.get("gratuity", 0)),
         }
     )
 
-    return Response({"message": "Salary saved successfully"})
+    return Response({
+        "message": "Salary structure saved successfully",
+        "created": created
+    })
 
 
 @api_view(["GET"])
@@ -811,16 +920,16 @@ def get_salary_by_employee(request, employee_id):
     })
 
 
-def calculate_epf(basic_after_lop, salary):
+def calculate_epf(basic_after_lop, employee):
 
-    if not salary.pf_applicable:
+    if not employee.pf_applicable:
         return Decimal("0.00"), Decimal("0.00")
 
     PF_RATE = Decimal("0.12")
     PF_WAGE_CEILING = Decimal("15000")
 
     # Apply ceiling only if applicable
-    if salary.pf_wage_ceiling_applicable:
+    if employee.pf_wage_ceiling_applicable:
         pf_wage = min(basic_after_lop, PF_WAGE_CEILING)
     else:
         pf_wage = basic_after_lop
@@ -831,20 +940,20 @@ def calculate_epf(basic_after_lop, salary):
     return employee_pf, employer_pf
 
 
-def calculate_esi(gross_after_lop, salary):
+def calculate_esi(gross_after_lop, employee):
 
-    if not salary.esi_applicable:
+    if not employee.esi_applicable:
         return Decimal("0.00"), Decimal("0.00")
 
-    ESI_ELIGIBILITY_LIMIT = Decimal("21000")
-    EMPLOYEE_ESI_RATE = Decimal("0.0075")   # 0.75%
-    EMPLOYER_ESI_RATE = Decimal("0.0325")   # 3.25%
+    ESI_EMPLOYEE_RATE = Decimal("0.0075")
+    ESI_EMPLOYER_RATE = Decimal("0.0325")
+    ESI_LIMIT = Decimal("21000")
 
-    if gross_after_lop > ESI_ELIGIBILITY_LIMIT:
+    if gross_after_lop > ESI_LIMIT:
         return Decimal("0.00"), Decimal("0.00")
 
-    employee_esi = gross_after_lop * EMPLOYEE_ESI_RATE
-    employer_esi = gross_after_lop * EMPLOYER_ESI_RATE
+    employee_esi = gross_after_lop * ESI_EMPLOYEE_RATE
+    employer_esi = gross_after_lop * ESI_EMPLOYER_RATE
 
     return employee_esi, employer_esi
 
@@ -859,12 +968,14 @@ def generate_payslip(request):
 
     employee_id = request.data.get("employee_id")
     month_value = request.data.get("month")
-    encash_leaves = request.data.get("encash_leaves", False)
 
+    # =====================================================
+    # 1️⃣ BASIC VALIDATION
+    # =====================================================
     if not employee_id or not month_value:
         return Response(
             {"error": "employee_id and month required"},
-            status=status.HTTP_400_BAD_REQUEST
+            status=400
         )
 
     try:
@@ -873,133 +984,184 @@ def generate_payslip(request):
         month = month_date.month
     except ValueError:
         return Response(
-            {"error": "Invalid month format. Use YYYY-MM"},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "Invalid month format (YYYY-MM)"},
+            status=400
         )
 
+    # =====================================================
+    # 2️⃣ AUTO-CREATE PAYROLL MONTH
+    # =====================================================
+    payroll_month, created = PayrollMonth.objects.get_or_create(
+        year=year,
+        month=month,
+        defaults={"status": "OPEN"}
+    )
+
+    # Auto reopen payroll if closed
+    if payroll_month.status == "CLOSED":
+        payroll_month.status = "OPEN"
+        payroll_month.save()
+
+    # =====================================================
+    # 3️⃣ EMPLOYEE VALIDATION
+    # =====================================================
     try:
-        employee = Employee.objects.select_related("salary", "company").get(id=employee_id)
+        employee = Employee.objects.select_related("salary").get(id=employee_id)
     except Employee.DoesNotExist:
         return Response({"error": "Employee not found"}, status=404)
 
-    if not hasattr(employee, "salary"):
-        return Response({"error": "Salary structure not set"}, status=400)
+    if not employee.is_active:
+        return Response(
+            {"error": "Cannot generate payslip for inactive employee"},
+            status=400
+        )
 
-    # Prevent duplicate
+    salary = get_current_salary(employee)
+
+    if not salary:
+        return Response(
+            {"error": "Salary structure not set"},
+            status=400
+        )
+
+    # salary = employee.salary
+    gross_salary = (
+        (salary.basic or 0) +
+        (salary.da or 0) +
+        (salary.hra or 0) +
+        (salary.conveyance or 0) +
+        (salary.medical or 0) +
+        (salary.special_allowance or 0)
+    )
+
+    if gross_salary <= 0:
+        return Response(
+            {"error": "Invalid salary structure. Gross salary must be greater than 0."},
+            status=400
+        )
+
+    # =====================================================
+    # 4️⃣ PREVENT DUPLICATE
+    # =====================================================
     if Payslip.objects.filter(
         employee=employee,
         month__year=year,
         month__month=month
     ).exists():
-        return Response(
-            {"error": "Payslip already generated"},
-            status=400
-        )
+        return Response({"error": "Payslip already generated"}, status=400)
 
-    salary = employee.salary
+    # =====================================================
+    # 5️⃣ EARNINGS (A)
+    # =====================================================
+    basic = salary.basic
+    da = salary.da
+    hra = salary.hra
+    conveyance = salary.conveyance
+    medical = salary.medical
+    special_allowance = salary.special_allowance
+    gross_salary = (
+    (salary.basic or 0) +
+    (salary.da or 0) +
+    (salary.hra or 0) +
+    (salary.conveyance or 0) +
+    (salary.medical or 0) +
+    (salary.special_allowance or 0)
+)
 
-    # ==============================
-    # SALARY STRUCTURE
-    # ==============================
-    basic = Decimal(salary.basic)
-    hra = Decimal(salary.hra)
-    allowances = Decimal(salary.allowances)
-    fixed_deductions = Decimal(salary.deductions)
+    # =====================================================
+    # 6️⃣ LOP CALCULATION (Service-Based Version)
+    # =====================================================
 
-    gross_salary = basic + hra + allowances
-
-    # ==============================
-    # LOP
-    # ==============================
-    lop_days, lop_deduction = calculate_lop(
+    lop_days = calculate_lop_for_month(
         employee,
         year,
-        month,
-        gross_salary
+        month
     )
 
-    gross_after_lop = gross_salary - lop_deduction
+    total_days = monthrange(year, month)[1]
 
-    # ==============================
-    # BASIC AFTER LOP (for PF)
-    # ==============================
-    basic_ratio = basic / gross_salary if gross_salary > 0 else Decimal("0")
+    per_day_salary = Decimal(gross_salary) / Decimal(total_days)
+
+    lop_deduction = per_day_salary * Decimal(lop_days)
+
+    gross_after_lop = gross_salary - lop_deduction
+    if gross_after_lop < 0:
+        gross_after_lop = Decimal("0.00")
+
+    # =====================================================
+    # 7️⃣ PF CALCULATION
+    # =====================================================
+    total_days = monthrange(year, month)[1]
+
+    if gross_salary > 0:
+        basic_ratio = basic / gross_salary
+    else:
+        basic_ratio = Decimal("0")
+
     basic_after_lop = basic - (lop_deduction * basic_ratio)
 
     if basic_after_lop < 0:
         basic_after_lop = Decimal("0.00")
 
-    # ==============================
-    # EPF
-    # ==============================
     employee_pf, employer_pf = calculate_epf(
         basic_after_lop,
-        salary
+        employee
     )
 
-    # ==============================
-    # ESI
-    # ==============================
+    # =====================================================
+    # 8️⃣ ESI CALCULATION
+    # =====================================================
     employee_esi, employer_esi = calculate_esi(
         gross_after_lop,
-        salary
+        employee
     )
 
-    # ==============================
-    # PROFESSIONAL TAX
-    # ==============================
+    # =====================================================
+    # 9️⃣ PROFESSIONAL TAX
+    # =====================================================
     professional_tax = calculate_professional_tax(
         gross_after_lop,
         employee
     )
 
-    # ==============================
-    # LEAVE ENCASHMENT
-    # ==============================
-    if encash_leaves:
-        leave_encash_days, leave_encash_amount = calculate_leave_encashment(
-            employee,
-            year,
-            month,
-            gross_salary
-        )
-    else:
-        leave_encash_days = Decimal("0.0")
-        leave_encash_amount = Decimal("0.00")
-
-    # ==============================
-    # TDS CALCULATION
-    # ==============================
+    # =====================================================
+    # 🔟 TDS
+    # =====================================================
     annual_projection = gross_salary * Decimal("12")
     tds_amount = calculate_monthly_tds(employee, annual_projection)
 
-    # ==============================
-    # FINAL NET PAY
-    # ==============================
-    net_pay = (
-        gross_salary
-        - lop_deduction
-        - fixed_deductions
-        - employee_pf
-        - employee_esi
-        - professional_tax
-        - tds_amount
-        + leave_encash_amount
+    # =====================================================
+    # 1️⃣1️⃣ OTHER DEDUCTIONS
+    # =====================================================
+    medical_insurance = salary.medical_insurance or Decimal("0.00")
+
+    total_deductions = (
+        employee_pf +
+        employee_esi +
+        professional_tax +
+        tds_amount +
+        medical_insurance +
+        lop_deduction
     )
+
+    net_pay = gross_salary - total_deductions
 
     if net_pay < 0:
         net_pay = Decimal("0.00")
 
-    # ==============================
-    # CREATE PAYSLIP
-    # ==============================
+    # =====================================================
+    # 1️⃣2️⃣ CREATE PAYSLIP
+    # =====================================================
     payslip = Payslip.objects.create(
         employee=employee,
         month=month_date,
+
         basic=basic,
+        da=da,
         hra=hra,
-        allowances=allowances,
-        fixed_deductions=fixed_deductions,
+        conveyance=conveyance,
+        medical=medical,
+        special_allowance=special_allowance,
         gross_salary=gross_salary,
 
         lop_days=lop_days,
@@ -1007,35 +1169,25 @@ def generate_payslip(request):
 
         employee_pf=employee_pf,
         employer_pf=employer_pf,
-
         employee_esi=employee_esi,
         employer_esi=employer_esi,
-
         professional_tax=professional_tax,
-
-        leave_encashment_days=leave_encash_days,
-        leave_encashment_amount=leave_encash_amount,
-
         tds_amount=tds_amount,
+        medical_insurance=medical_insurance,
 
         net_pay=net_pay,
         status="DRAFT"
     )
 
-    return Response(
-        {
-            "message": "Payslip generated successfully",
-            "employee": employee.first_name,
-            "gross_salary": gross_salary,
-            "lop_deduction": lop_deduction,
-            "employee_pf": employee_pf,
-            "employee_esi": employee_esi,
-            "professional_tax": professional_tax,
-            "tds_amount": tds_amount,
-            "net_pay": net_pay,
-        },
-        status=status.HTTP_201_CREATED
-    )
+    return Response({
+        "message": "Payslip generated successfully",
+        "payroll_month_created": created,
+        "gross_salary": gross_salary,
+        "lop_days": lop_days,
+        "lop_deduction": lop_deduction,
+        "total_deductions": total_deductions,
+        "net_pay": net_pay
+    }, status=201)
 
 
 def calculate_lop(employee, year, month, gross_salary):
@@ -1083,8 +1235,8 @@ def bulk_generate_payslips(request):
             continue
 
         salary = emp.salary
-        gross = salary.basic + salary.hra + salary.allowances
-        net = gross - salary.deductions
+        gross = salary.gross_salary()
+        net = gross - salary.fixed_deductions
 
         Payslip.objects.get_or_create(
             employee=emp,
@@ -1108,10 +1260,30 @@ def bulk_generate_payslips(request):
 # ============================================================
 
 @api_view(["POST"])
-@permission_classes([IsHR])
+@permission_classes([IsAuthenticated])
 def approve_payslip(request, payslip_id):
-    Payslip.objects.filter(id=payslip_id).update(status="APPROVED")
-    return Response({"message": "Payslip approved"})
+
+    try:
+        payslip = Payslip.objects.select_related("employee").get(id=payslip_id)
+    except Payslip.DoesNotExist:
+        return Response({"error": "Payslip not found"}, status=404)
+
+    # Approve payslip
+    payslip.status = "APPROVED"
+    payslip.save()
+
+    year = payslip.month.year
+    month = payslip.month.month
+
+    # Check if any payslip still NOT approved
+    pending = Payslip.objects.filter(
+        month__year=year,
+        month__month=month
+    ).exclude(status="APPROVED").exists()
+
+    return Response({
+        "message": "Payslip approved successfully"
+    })
 
 
 @api_view(["POST"])
@@ -1135,63 +1307,188 @@ def cancel_payslip(request, payslip_id):
 # PAYSLIP PDF (Professional)
 # ============================================================
 
-def generate_payslip_pdf(payslip):
+# def generate_payslip_pdf(payslip):
 
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    elements = []
-    styles = getSampleStyleSheet()
+#     buffer = io.BytesIO()
+#     doc = SimpleDocTemplate(buffer, pagesize=A4)
+#     elements = []
+#     styles = getSampleStyleSheet()
 
-    elements.append(Paragraph("GMMC HRMS - Payslip", styles["Title"]))
-    elements.append(Spacer(1, 20))
+#     # =========================================================
+#     # HEADER
+#     # =========================================================
+#     # =========================================================
+#     # HEADER
+#     # =========================================================
+#     elements.append(Paragraph("<b>PAYSLIP</b>", styles["Title"]))
+#     elements.append(Spacer(1, 12))
 
-    elements.append(Paragraph(
-        f"Employee: {payslip.employee.first_name} {payslip.employee.last_name}",
-        styles["Normal"]
-    ))
+#     company_name = "GMMC Company Pvt Ltd"
 
-    elements.append(Paragraph(
-        f"Month: {payslip.month.strftime('%B %Y')}",
-        styles["Normal"]
-    ))
+#     elements.append(Paragraph(
+#         f"Company: {company_name}",
+#         styles["Normal"]
+#     ))
 
-    elements.append(Spacer(1, 20))
+#     elements.append(Paragraph(
+#         f"Month: {payslip.month.strftime('%B %Y')}",
+#         styles["Normal"]
+#     ))
 
-    data = [
-        ["Basic", payslip.basic],
-        ["HRA", payslip.hra],
-        ["Allowances", payslip.allowances],
-        ["Deductions", payslip.fixed_deductions],
-        ["Gross Salary", payslip.gross_salary],
-        ["Net Pay", payslip.net_pay],
-    ]
+#     elements.append(Spacer(1, 20))
 
-    table = Table(data)
-    table.setStyle([
-        ("GRID", (0,0), (-1,-1), 1, colors.grey)
-    ])
+#     # =========================================================
+#     # EMPLOYEE DETAILS
+#     # =========================================================
+#     employee = payslip.employee
 
-    elements.append(table)
-    doc.build(elements)
+#     total_days = monthrange(payslip.month.year, payslip.month.month)[1]
 
-    pdf = buffer.getvalue()
-    buffer.close()
-    return pdf
+#     employee_data = [
+#         ["EMPCODE", getattr(employee, "employee_id", ""), "PF NO", getattr(employee, "pf_number", "")],
+#         ["EMPNAME", getattr(employee, "first_name", ""), "STD DAYS", total_days],
+#         ["DESIGNATION", getattr(employee, "designation", ""), "WRK DAYS", total_days],
+#         ["DOJ", getattr(employee, "date_of_joining", ""), "LOP DAYS", payslip.lop_days],
+#         ["BUSINESS UNIT", getattr(employee, "department", ""), "BANK NAME", getattr(employee, "bank_name", "")],
+#         ["PAN", getattr(employee, "pan_number", ""), "ACCOUNT NO", getattr(employee, "bank_account_number", "")],
+#         ["LOCATION", getattr(employee, "location", ""), "UAN", getattr(employee, "uan_number", "")],
+#     ]
+
+#     table = Table(employee_data, colWidths=[120,150,120,150])
+
+#     emp_table = Table(employee_data, colWidths=[2.5 * inch, 3 * inch])
+#     emp_table.setStyle([
+#         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+#     ])
+
+#     elements.append(emp_table)
+#     elements.append(Spacer(1, 20))
+
+#     # =========================================================
+#     # EARNINGS (A)
+#     # =========================================================
+#     earnings_data = [
+#         ["Component", "Amount (₹)"],
+#         ["Basic", payslip.basic],
+#         ["DA", payslip.da],
+#         ["HRA", payslip.hra],
+#         ["Conveyance", payslip.conveyance],
+#         ["Medical", payslip.medical],
+#         ["Special Allowance", payslip.special_allowance],
+#         ["Bonus", payslip.bonus],
+#         ["Other Allowance", payslip.other_allowance],
+#         ["Gross Salary (A)", payslip.gross_salary],
+#     ]
+
+#     earnings_table = Table(earnings_data, colWidths=[3 * inch, 2 * inch])
+#     earnings_table.setStyle([
+#         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+#         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+#     ])
+
+#     elements.append(Paragraph("<b>EARNINGS</b>", styles["Heading3"]))
+#     elements.append(Spacer(1, 10))
+#     elements.append(earnings_table)
+#     elements.append(Spacer(1, 20))
+
+#     # =========================================================
+#     # DEDUCTIONS (B)
+#     # =========================================================
+#     total_deductions = (
+#         payslip.lop_deduction +
+#         payslip.employee_pf +
+#         payslip.employee_esi +
+#         payslip.professional_tax +
+#         payslip.tds_amount +
+#         payslip.medical_insurance
+#     )
+
+#     deductions_data = [
+#         ["Component", "Amount (₹)"],
+#         ["LOP Deduction", payslip.lop_deduction],
+#         ["Employee PF", payslip.employee_pf],
+#         ["Employee ESI", payslip.employee_esi],
+#         ["Professional Tax", payslip.professional_tax],
+#         ["TDS", payslip.tds_amount],
+#         # ["Fixed Deductions", payslip.fixed_deductions],
+#         ["Fixed Deductions", getattr(payslip, "fixed_deductions", 0)],
+#         ["Total Deductions (B)", total_deductions],
+#     ]
+
+#     deductions_table = Table(deductions_data, colWidths=[3 * inch, 2 * inch])
+#     deductions_table.setStyle([
+#         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+#         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+#     ])
+
+#     elements.append(Paragraph("<b>DEDUCTIONS</b>", styles["Heading3"]))
+#     elements.append(Spacer(1, 10))
+#     elements.append(deductions_table)
+#     elements.append(Spacer(1, 20))
+
+#     # =========================================================
+#     # EMPLOYER CONTRIBUTIONS (C)
+#     # =========================================================
+#     employer_data = [
+#         ["Component", "Amount (₹)"],
+#         ["Employer PF", payslip.employer_pf],
+#         ["Employer ESI", payslip.employer_esi],
+#     ]
+
+#     employer_table = Table(employer_data, colWidths=[3 * inch, 2 * inch])
+#     employer_table.setStyle([
+#         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+#         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+#     ])
+
+#     elements.append(Paragraph("<b>EMPLOYER CONTRIBUTIONS</b>", styles["Heading3"]))
+#     elements.append(Spacer(1, 10))
+#     elements.append(employer_table)
+#     elements.append(Spacer(1, 20))
+
+#     # =========================================================
+#     # FINAL SUMMARY
+#     # =========================================================
+#     ctc = payslip.gross_salary + payslip.employer_pf + payslip.employer_esi
+
+#     summary_data = [
+#         ["Net Salary (A - B)", payslip.net_pay],
+#         ["CTC (A + C)", ctc],
+#     ]
+
+#     summary_table = Table(summary_data, colWidths=[3 * inch, 2 * inch])
+#     summary_table.setStyle([
+#         ("GRID", (0, 0), (-1, -1), 1, colors.black),
+#         ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
+#     ])
+
+#     elements.append(Paragraph("<b>SUMMARY</b>", styles["Heading3"]))
+#     elements.append(Spacer(1, 10))
+#     elements.append(summary_table)
+
+#     doc.build(elements)
+
+#     pdf = buffer.getvalue()
+#     buffer.close()
+#     return pdf
 
 
-@api_view(["GET"])
-@permission_classes([IsHR])
-def download_payslip_pdf(request, payslip_id):
-    try:
-        payslip = Payslip.objects.get(id=payslip_id)
-    except Payslip.DoesNotExist:
-        return Response({"error": "Payslip not found"}, status=404)
+# @api_view(["GET"])
+# @permission_classes([IsAuthenticated])
+# def download_payslip_pdf(request, payslip_id):
 
-    pdf = generate_payslip_pdf(payslip)
+#     try:
+#         payslip = Payslip.objects.get(id=payslip_id)
+#     except Payslip.DoesNotExist:
+#         return Response({"error": "Payslip not found"}, status=404)
 
-    response = HttpResponse(pdf, content_type="application/pdf")
-    response["Content-Disposition"] = f"attachment; filename=payslip_{payslip_id}.pdf"
-    return response
+#     # Allow HR OR employee owner
+#     if not request.user.is_staff and request.user != payslip.employee.user:
+#         return Response({"error": "Permission denied"}, status=403)
+
+#     pdf = generate_payslip_pdf(payslip)
+
+#     return HttpResponse(pdf, content_type="application/pdf")
 
 
 # ============================================================
@@ -1287,6 +1584,7 @@ def bulk_email_payslips(request):
 
 @api_view(["POST"])
 @permission_classes([IsHR])
+@transaction.atomic
 def bulk_approve_payslips(request):
 
     month_value = request.data.get("month")
@@ -1294,17 +1592,65 @@ def bulk_approve_payslips(request):
     if not month_value:
         return Response({"error": "month required"}, status=400)
 
-    month_date = datetime.strptime(month_value, "%Y-%m").date()
+    try:
+        month_date = datetime.strptime(month_value, "%Y-%m").date()
+        year = month_date.year
+        month = month_date.month
+    except ValueError:
+        return Response({"error": "Invalid month format (YYYY-MM)"}, status=400)
 
-    updated = Payslip.objects.filter(
-        month__year=month_date.year,
-        month__month=month_date.month,
+    # =========================================================
+    # 1️⃣ APPROVE ALL DRAFT PAYSLIPS
+    # =========================================================
+    approved_now = Payslip.objects.filter(
+        month__year=year,
+        month__month=month,
         status="DRAFT"
     ).update(status="APPROVED")
 
+    # =========================================================
+    # 2️⃣ GET ALL ACTIVE EMPLOYEES WITH SALARY STRUCTURE
+    # =========================================================
+    salaried_employees = Employee.objects.filter(
+        is_active=True,
+        salary__isnull=False
+    )
+
+    total_salaried = salaried_employees.count()
+
+    # =========================================================
+    # 3️⃣ COUNT APPROVED PAYSLIPS
+    # =========================================================
+    approved_count = Payslip.objects.filter(
+        month__year=year,
+        month__month=month,
+        status="APPROVED"
+    ).count()
+
+    # =========================================================
+    # 4️⃣ AUTO-CLOSE ONLY IF ALL APPROVED
+    # =========================================================
+    payroll_month, created = PayrollMonth.objects.get_or_create(
+        year=year,
+        month=month,
+        defaults={"status": "OPEN"}
+    )
+
+    if total_salaried > 0 and approved_count == total_salaried:
+        payroll_month.status = "CLOSED"
+        payroll_month.save()
+
+        return Response({
+            "message": "All payslips approved. Payroll month CLOSED.",
+            "approved_now": approved_now,
+            "total_salaried": total_salaried
+        })
+
     return Response({
-        "message": f"{updated} payslips approved",
-        "approved_count": updated
+        "message": "Payslips approved but payroll month remains OPEN (pending approvals).",
+        "approved_now": approved_now,
+        "total_salaried": total_salaried,
+        "approved_total": approved_count
     })
 
 
@@ -1510,13 +1856,33 @@ def payroll_status(request):
 
     month_date = datetime.strptime(month_value, "%Y-%m").date()
 
+    # ============================================
+    # GET PAYROLL MONTH STATUS
+    # ============================================
+
+    payroll_month = PayrollMonth.objects.filter(
+        year=month_date.year,
+        month=month_date.month
+    ).first()
+
+    payroll_state = "OPEN"
+
     employees = Employee.objects.all()
 
     response_data = []
 
     for emp in employees:
 
-        salary_set = hasattr(emp, "salary")
+        # ============================================
+        # GET CURRENT SALARY
+        # ============================================
+
+        salary = get_current_salary(emp)
+        salary_set = salary is not None
+
+        # ============================================
+        # PAYSLIP
+        # ============================================
 
         payslip = Payslip.objects.filter(
             employee=emp,
@@ -1528,17 +1894,81 @@ def payroll_status(request):
             if payslip.status != filter_status:
                 continue
 
+        # ============================================
+        # SALARY CALCULATION
+        # ============================================
+
+        if salary:
+            gross_salary = (
+                (salary.basic or 0) +
+                (salary.da or 0) +
+                (salary.hra or 0) +
+                (salary.conveyance or 0) +
+                (salary.medical or 0) +
+                (salary.special_allowance or 0)
+            )
+
+            employer_pf = getattr(salary, "employer_pf", 0) or 0
+            employer_esi = getattr(salary, "employer_esi", 0) or 0
+
+        else:
+            gross_salary = 0
+            employer_pf = 0
+            employer_esi = 0
+
+        ctc = gross_salary + employer_pf + employer_esi
+
+        # ============================================
+        # RESPONSE
+        # ============================================
+
         response_data.append({
+
             "employee_id": emp.id,
             "employee_name": f"{emp.first_name} {emp.last_name}",
+
             "salary_set": salary_set,
+
             "payslip_generated": bool(payslip),
+
             "payslip_status": payslip.status if payslip else None,
+
             "payslip_id": payslip.id if payslip else None,
+
+            # Salary info
+            "gross_salary": payslip.gross_salary if payslip else gross_salary,
+
+            "lop_days": payslip.lop_days if payslip else 0,
+
+            "lop_deduction": payslip.lop_deduction if payslip else 0,
+
+            "total_deductions": (
+                payslip.employee_pf +
+                payslip.employee_esi +
+                payslip.professional_tax +
+                payslip.tds_amount +
+                payslip.fixed_deductions
+            ) if payslip else 0,
+
+            "net_pay": payslip.net_pay if payslip else 0,
+
+            # CTC
+            "ctc": (
+                payslip.gross_salary +
+                payslip.employer_pf +
+                payslip.employer_esi
+            ) if payslip else ctc,
         })
 
-    return Response(response_data)
+    # ============================================
+    # FINAL RESPONSE
+    # ============================================
 
+    return Response({
+        "payroll_status": payroll_state,
+        "month": month_value,
+        "employees": response_data
+    })
 
 # ============================================================
 # REOPEN PAYROLL MONTH
@@ -1564,21 +1994,18 @@ def reopen_payroll_month(request):
     return Response({"message": "Payroll month reopened"})
 
 
-
 def calculate_professional_tax(gross_after_lop, employee):
 
-    company_state = employee.company.state  # assuming company model added
+    if not employee.pt_applicable:
+        return Decimal("0.00")
 
-    slab = ProfessionalTaxSlab.objects.filter(
-        state=company_state,
-        min_salary__lte=gross_after_lop,
-        max_salary__gte=gross_after_lop
-    ).first()
-
-    if slab:
-        return slab.pt_amount
-
-    return Decimal("0.00")
+    # Andhra Pradesh PT Slab (example)
+    if gross_after_lop <= 15000:
+        return Decimal("0.00")
+    elif gross_after_lop <= 20000:
+        return Decimal("150.00")
+    else:
+        return Decimal("200.00")
 
 
 
@@ -1762,7 +2189,8 @@ def epfo_ecr_file(request):
     for slip in payslips:
 
         employee = slip.employee
-        salary = employee.salary
+        # salary = employee.salary
+        salary = get_current_salary(employee)
 
         # ===============================
         # EPF WAGES (Ceiling ₹15,000)
@@ -2145,13 +2573,16 @@ def generate_full_final(request):
     except:
         return Response({"error": "Invalid date format YYYY-MM-DD"}, status=400)
 
-    salary = employee.salary
+    # salary = employee.salary
+    salary = get_current_salary(employee)
 
-    basic = Decimal(salary.basic)
-    hra = Decimal(salary.hra)
-    allowances = Decimal(salary.allowances)
+    # basic = Decimal(salary.basic)
+    # hra = Decimal(salary.hra)
+    # allowances = Decimal(salary.allowances)
 
-    gross_monthly = basic + hra + allowances
+    # gross_monthly = basic + hra + allowances
+
+    gross_monthly = salary.gross_salary()
 
     total_days = monthrange(last_date.year, last_date.month)[1]
     worked_days = last_date.day
@@ -2199,3 +2630,428 @@ def generate_full_final(request):
         "tds_amount": tds_amount,
         "final_amount": final_amount
     }, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsHR])
+def ctc_yearly_breakdown(request):
+
+    employee_id = request.query_params.get("employee_id")
+
+    if not employee_id:
+        return Response({"error": "employee_id required"}, status=400)
+
+    try:
+        employee = Employee.objects.select_related("salary").get(id=employee_id)
+    except Employee.DoesNotExist:
+        return Response({"error": "Employee not found"}, status=404)
+
+    if not hasattr(employee, "salary"):
+        return Response({"error": "Salary structure not set"}, status=400)
+
+    # salary = employee.salary
+    salary = get_current_salary(employee)
+
+    # ================= MONTHLY =================
+    monthly_gross = salary.gross_salary
+    monthly_deductions = salary.total_deductions
+    monthly_net = salary.net_salary
+    monthly_employer = salary.additional_benefits
+    monthly_ctc = salary.ctc
+
+    # ================= YEARLY =================
+    yearly_gross = monthly_gross * Decimal("12")
+    yearly_deductions = monthly_deductions * Decimal("12")
+    yearly_net = monthly_net * Decimal("12")
+    yearly_employer = monthly_employer * Decimal("12")
+    yearly_ctc = monthly_ctc * Decimal("12")
+
+    return Response({
+        "employee_name": f"{employee.first_name} {employee.last_name}",
+
+        "monthly": {
+            "gross_salary": monthly_gross,
+            "total_deductions": monthly_deductions,
+            "net_salary": monthly_net,
+            "employer_contribution": monthly_employer,
+            "ctc": monthly_ctc,
+        },
+
+        "yearly": {
+            "gross_salary": yearly_gross,
+            "total_deductions": yearly_deductions,
+            "net_salary": yearly_net,
+            "employer_contribution": yearly_employer,
+            "ctc": yearly_ctc,
+        },
+
+        "breakdown_yearly": {
+            "basic": salary.basic * 12,
+            "da": salary.da * 12,
+            "hra": salary.hra * 12,
+            "conveyance": salary.conveyance * 12,
+            "medical": salary.medical * 12,
+            "special_allowance": salary.special_allowance * 12,
+            "employee_pf": salary.employee_pf * 12,
+            "professional_tax": salary.professional_tax * 12,
+            "employee_esi": salary.employee_esi * 12,
+            "tds": salary.tds * 12,
+            "medical_insurance": salary.medical_insurance * 12,
+            "employer_pf": salary.employer_pf * 12,
+            "employer_esi": salary.employer_esi * 12,
+            "gratuity": salary.gratuity * 12,
+        }
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsEmployee])
+def my_payroll_summary(request):
+
+    employee = request.user.employee_profile
+    current_year = timezone.now().year
+
+    records = Payslip.objects.filter(
+        employee=employee,
+        month__year=current_year
+    )
+
+    latest = records.order_by("-month").first()
+
+    summary = {
+
+        "employee_id": employee.id,
+
+        "latest_net_pay": latest.net_pay if latest else 0,
+
+        "ytd_earnings": records.aggregate(
+            total=Sum("gross_salary")
+        )["total"] or 0,
+
+        "ytd_pf": records.aggregate(
+            total=Sum("employee_pf")
+        )["total"] or 0,
+
+        "ytd_tax": records.aggregate(
+            total=Sum("tds_amount")
+        )["total"] or 0,
+
+        "ytd_lop_days": records.aggregate(
+            total=Sum("lop_days")
+        )["total"] or 0,
+
+    }
+
+    return Response(summary)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def payroll_summary(request):
+
+    year = request.GET.get("year")
+    month = request.GET.get("month")
+
+    payslips = Payslip.objects.all()
+
+    if year and month:
+        payslips = payslips.filter(
+            month__year=year,
+            month__month=month
+        )
+
+    total_monthly_ctc = payslips.aggregate(
+        total=Sum("gross_salary")
+    )["total"] or 0
+
+    total_net_pay = payslips.aggregate(
+        total=Sum("net_pay")
+    )["total"] or 0
+
+    total_employees = payslips.count()
+
+    average_monthly_ctc = (
+        total_monthly_ctc / total_employees
+        if total_employees > 0 else 0
+    )
+
+    return Response({
+        "total_monthly_ctc": total_monthly_ctc,
+        "total_net_pay": total_net_pay,
+        "total_employees": total_employees,
+        "average_monthly_ctc": average_monthly_ctc,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def download_payslip_pdf(request, payslip_id):
+
+    try:
+        payslip = Payslip.objects.select_related("employee").get(id=payslip_id)
+    except Payslip.DoesNotExist:
+        return Response({"error": "Payslip not found"}, status=404)
+
+    # Allow HR or the employee owner
+    if not request.user.is_staff and request.user != payslip.employee.user:
+        return Response({"error": "Permission denied"}, status=403)
+
+    pdf = generate_payslip_pdf(payslip)
+
+    response = HttpResponse(pdf, content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="Payslip_{payslip.month}.pdf"'
+
+    return response
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def export_payroll_excel(request):
+
+    year = request.GET.get("year")
+    month = request.GET.get("month")
+
+    payslips = Payslip.objects.select_related("employee")
+
+    if year and month:
+        payslips = payslips.filter(
+            month__year=year,
+            month__month=month
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Payroll Report"
+
+    headers = [
+        "Employee ID",
+        "Employee Name",
+        "Month",
+        "Gross Salary",
+        "Net Pay"
+    ]
+
+    ws.append(headers)
+
+    for slip in payslips:
+        ws.append([
+            slip.employee.employee_id,
+            f"{slip.employee.first_name} {slip.employee.last_name}",
+            slip.month.strftime("%B %Y"),
+            float(slip.gross_salary),
+            float(slip.net_pay),
+        ])
+
+    response = HttpResponse(
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    response["Content-Disposition"] = 'attachment; filename="payroll_report.xlsx"'
+
+    wb.save(response)
+    return response
+
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def export_payroll_pdf(request):
+
+    year = request.GET.get("year")
+    month = request.GET.get("month")
+
+    payslips = Payslip.objects.select_related("employee")
+
+    if year and month:
+        payslips = payslips.filter(
+            month__year=year,
+            month__month=month
+        )
+
+    response = HttpResponse(content_type="application/pdf")
+    response["Content-Disposition"] = (
+        f'attachment; filename="payroll_report_{month}_{year}.pdf"'
+    )
+
+    doc = SimpleDocTemplate(response, pagesize=pagesizes.A4)
+    elements = []
+    styles = getSampleStyleSheet()
+
+    # ================= HEADER =================
+    elements.append(Paragraph("<b>GMMC HRMS</b>", styles["Title"]))
+    elements.append(Spacer(1, 0.2 * inch))
+
+    if year and month:
+        month_name = datetime(
+            int(year),
+            int(month),
+            1
+        ).strftime("%B %Y")
+        elements.append(
+            Paragraph(
+                f"<b>Payroll Report – {month_name}</b>",
+                styles["Heading2"]
+            )
+        )
+        elements.append(Spacer(1, 0.3 * inch))
+
+    # ================= SUMMARY =================
+    total_gross = payslips.aggregate(
+        total=Sum("gross_salary")
+    )["total"] or 0
+
+    total_net = payslips.aggregate(
+        total=Sum("net_pay")
+    )["total"] or 0
+
+    total_employees = payslips.count()
+
+    summary_data = [
+        ["Total Employees", total_employees],
+        ["Total Gross Salary", f"₹ {total_gross:,.2f}"],
+        ["Total Net Pay", f"₹ {total_net:,.2f}"],
+    ]
+
+    summary_table = Table(summary_data, colWidths=[3 * inch, 2 * inch])
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+    ]))
+
+    elements.append(summary_table)
+    elements.append(Spacer(1, 0.5 * inch))
+
+    # ================= EMPLOYEE TABLE =================
+
+    data = [
+        [
+            "Employee ID",
+            "Employee Name",
+            "Gross Salary",
+            "Net Pay"
+        ]
+    ]
+
+    for slip in payslips:
+        data.append([
+            slip.employee.employee_id,
+            f"{slip.employee.first_name} {slip.employee.last_name}",
+            f"₹ {slip.gross_salary:,.2f}",
+            f"₹ {slip.net_pay:,.2f}",
+        ])
+
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+    ]))
+
+    elements.append(table)
+
+    # ================= FOOTER =================
+    elements.append(Spacer(1, 0.5 * inch))
+    elements.append(
+        Paragraph(
+            "Generated by GMMC HRMS System",
+            styles["Normal"]
+        )
+    )
+
+    doc.build(elements)
+
+    return response
+
+
+
+class SalaryRevisionViewSet(ModelViewSet):
+
+    queryset = SalaryRevision.objects.all()
+    serializer_class = SalaryRevisionSerializer
+    permission_classes = [IsAuthenticated]
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def create_salary_revision(request):
+
+    try:
+        employee_id = request.data.get("employee")
+
+        if not employee_id:
+            return Response({"error": "Employee ID is required"}, status=400)
+
+        employee = Employee.objects.get(id=employee_id)
+
+        revision = SalaryRevision.objects.create(
+
+            employee=employee,
+            effective_from=request.data.get("effective_from"),
+
+            reason=request.data.get("reason"),
+            notes=request.data.get("notes"),
+
+            basic=Decimal(request.data.get("basic", 0)),
+            da=Decimal(request.data.get("da", 0)),
+            hra=Decimal(request.data.get("hra", 0)),
+            conveyance=Decimal(request.data.get("conveyance", 0)),
+            medical=Decimal(request.data.get("medical", 0)),
+            special_allowance=Decimal(request.data.get("special_allowance", 0)),
+
+            employee_pf=Decimal(request.data.get("employee_pf", 0)),
+            professional_tax=Decimal(request.data.get("professional_tax", 0)),
+            employee_esi=Decimal(request.data.get("employee_esi", 0)),
+            tds=Decimal(request.data.get("tds", 0)),
+            medical_insurance=Decimal(request.data.get("medical_insurance", 0)),
+
+            employer_pf=Decimal(request.data.get("employer_pf", 0)),
+            employer_esi=Decimal(request.data.get("employer_esi", 0)),
+            gratuity=Decimal(request.data.get("gratuity", 0)),
+        )
+
+        return Response({
+            "message": "Salary revision created successfully",
+            "revision_id": revision.id
+        })
+
+    except Employee.DoesNotExist:
+        return Response({"error": "Employee not found"}, status=404)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(["GET"])
+def employee_salary_history(request, employee_id):
+
+    revisions = SalaryRevision.objects.filter(
+        employee_id=employee_id
+    ).order_by("effective_from")
+
+    data = []
+
+    for rev in revisions:
+
+        gross = (
+            (rev.basic or 0) +
+            (rev.hra or 0) +
+            (rev.da or 0) +
+            (rev.conveyance or 0) +
+            (rev.medical or 0) +
+            (rev.special_allowance or 0)
+        )
+
+        data.append({
+            "id": rev.id,
+            "effective_from": rev.effective_from,
+            "gross_salary": gross,
+            "basic": rev.basic,
+            "hra": rev.hra,
+            "da": rev.da,
+            "conveyance": rev.conveyance,
+            "medical": rev.medical,
+            "special_allowance": rev.special_allowance
+        })
+
+    return Response(data)

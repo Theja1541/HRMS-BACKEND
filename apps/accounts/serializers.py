@@ -61,20 +61,17 @@ class LoginSerializer(serializers.Serializer):
                 {"email": "No account found with this email"}
             )
 
-        # 🔒 Check if locked
         if user.is_locked:
             raise serializers.ValidationError(
                 {"detail": "Account is locked. Contact admin."}
             )
 
-        # Authenticate
         authenticated_user = authenticate(
             username=user.username,
             password=password
         )
 
         if not authenticated_user:
-            # Increase failed attempts
             user.failed_attempts += 1
 
             if user.failed_attempts >= self.MAX_FAILED_ATTEMPTS:
@@ -87,7 +84,7 @@ class LoginSerializer(serializers.Serializer):
                 {"password": "Invalid password"}
             )
 
-        # Reset failed attempts on success
+        # Reset failed attempts
         user.failed_attempts = 0
         user.save()
 
@@ -96,11 +93,7 @@ class LoginSerializer(serializers.Serializer):
                 {"detail": "User is inactive"}
             )
 
-        if user.must_change_password:
-            raise serializers.ValidationError(
-                {"detail": "Password change required"}
-            )
-
+        # 🔥 DO NOT block must_change_password here
         data["user"] = user
         return data
 

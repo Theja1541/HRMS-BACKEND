@@ -218,7 +218,6 @@ from django.db import transaction
 from django.core.mail import EmailMultiAlternatives
 from django.utils import timezone
 from django.db.models import Count
-
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -227,19 +226,30 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
-
 import random
 import string
-
+from datetime import timedelta
 from .models import Employee, EmployeeHistory
 from .serializers import EmployeeListSerializer, EmployeeDetailSerializer
 from .permissions import IsHRorAdmin
-
 from apps.accounts.models import User
 from apps.attendance.models import Attendance
 from apps.leaves.models import LeaveBalance, LeaveRequest
 from apps.payroll.models import Payslip
 from apps.notifications.models import Notification
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from django.utils import timezone
+from django.db.models import Count, Q
+from apps.accounts.permissions import IsEmployee
+from apps.leaves.models import LeaveRequest
+from apps.attendance.models import Attendance
+from apps.payroll.models import Payslip
+from apps.notifications.models import Notification
+from datetime import date
+import calendar
+import json
+from apps.payroll.models import Salary
 
 
 class EmployeeViewSet(ModelViewSet):
@@ -266,10 +276,9 @@ class EmployeeViewSet(ModelViewSet):
         user = self.request.user
 
         if user.role == "EMPLOYEE":
-            return Employee.objects.filter(user=user, is_active=True)
+            return Employee.objects.filter(user=user, is_active=True).select_related("salary")
 
-        return Employee.objects.filter(is_active=True).select_related("user")
-
+        return Employee.objects.filter(is_active=True).select_related("user", "salary")
     # =====================================================
     # SERIALIZER
     # =====================================================
@@ -289,8 +298,9 @@ class EmployeeViewSet(ModelViewSet):
         return [IsAuthenticated()]
 
     # =====================================================
-    # CREATE EMPLOYEE + LOGIN ACCOUNT
+    # CREATE EMPLOYEE
     # =====================================================
+
 
     def perform_create(self, serializer):
 
@@ -325,28 +335,27 @@ class EmployeeViewSet(ModelViewSet):
                 pass
 
     # =====================================================
-    # UPDATE WITH HISTORY TRACKING
+    # UPDATE EMPLOYEE (WITH HISTORY)
     # =====================================================
 
     def perform_update(self, serializer):
-        instance = self.get_object()
-        old_data = {
-            field: getattr(instance, field)
-            for field in serializer.validated_data.keys()
-        }
+
+        request = self.request
+        salary_data = request.data.get("salary")
+
+        if salary_data:
+            salary_data = json.loads(salary_data)
 
         employee = serializer.save()
 
-        for field, old_value in old_data.items():
-            new_value = getattr(employee, field)
-            if str(old_value) != str(new_value):
-                EmployeeHistory.objects.create(
-                    employee=employee,
-                    changed_by=self.request.user,
-                    field_name=field,
-                    old_value=old_value,
-                    new_value=new_value
-                )
+        # 🔥 UPDATE SALARY
+        if salary_data:
+            salary_obj, created = Salary.objects.get_or_create(employee=employee)
+
+            for key, value in salary_data.items():
+                setattr(salary_obj, key, value)
+
+            salary_obj.save()
 
     # =====================================================
     # SOFT DELETE
@@ -357,7 +366,7 @@ class EmployeeViewSet(ModelViewSet):
         instance.save()
 
     # =====================================================
-    # EMPLOYEE SELF PROFILE
+    # CURRENT EMPLOYEE PROFILE
     # =====================================================
 
     @action(detail=False, methods=["get"])
@@ -383,7 +392,7 @@ class EmployeeViewSet(ModelViewSet):
         return Response({"exists": queryset.exists()})
 
     # =====================================================
-    # 🔥 DASHBOARD SUMMARY (PHASE 1 ENTERPRISE)
+    # 🔥 ENTERPRISE DASHBOARD SUMMARY (PHASE 2)
     # =====================================================
 
     @action(detail=False, methods=["get"], url_path="dashboard-summary")
@@ -399,7 +408,8 @@ class EmployeeViewSet(ModelViewSet):
         current_year = today.year
         current_month = today.month
 
-        # ===== PROFILE =====
+        # ---------------- PROFILE ----------------
+
         profile = {
             "employee_id": employee.employee_id,
             "name": f"{employee.first_name} {employee.last_name}",
@@ -410,7 +420,8 @@ class EmployeeViewSet(ModelViewSet):
             "profile_photo": employee.profile_photo.url if employee.profile_photo else None
         }
 
-        # ===== ATTENDANCE =====
+        # ---------------- ATTENDANCE (MONTH) ----------------
+
         monthly_records = Attendance.objects.filter(
             employee=employee,
             date__year=current_year,
@@ -431,36 +442,80 @@ class EmployeeViewSet(ModelViewSet):
             "check_out": today_record.check_out if today_record else None
         })
 
-        # ===== LEAVE =====
+        total_days = monthly_records.count()
+
+        attendance["attendance_percentage"] = round(
+            (attendance["present"] / total_days) * 100 if total_days > 0 else 0,
+            2
+        )
+
+        # ---------------- ATTENDANCE TREND (6 MONTHS) ----------------
+
+        attendance_trend = []
+
+        for i in range(6):
+            month_date = today.replace(day=1) - timedelta(days=30 * i)
+
+            records = Attendance.objects.filter(
+                employee=employee,
+                date__year=month_date.year,
+                date__month=month_date.month
+            )
+
+            attendance_trend.append({
+                "month": month_date.strftime("%b %Y"),
+                "present": records.filter(status="PRESENT").count()
+            })
+
+        attendance_trend.reverse()
+
+        # ---------------- LEAVE SUMMARY ----------------
+
         leave_balances = LeaveBalance.objects.filter(
             employee=employee,
             year=current_year
         )
 
-        total_balance = sum(lb.remaining for lb in leave_balances)
-
         leave_summary = {
-            "total_balance": total_balance,
+            "total_balance": sum(lb.remaining for lb in leave_balances),
             "pending_requests": LeaveRequest.objects.filter(
                 employee=employee,
                 status="PENDING"
             ).count()
         }
 
-        # ===== PAYROLL =====
+        # ---------------- PAYROLL ----------------
+
         last_payslip = Payslip.objects.filter(
             employee=employee
         ).order_by("-month").first()
 
         payroll = None
+
         if last_payslip:
             payroll = {
                 "month": last_payslip.month,
+                "basic": last_payslip.basic_salary,
+                "allowances": last_payslip.allowances,
+                "deductions": last_payslip.deductions,
                 "net_salary": last_payslip.net_pay,
                 "status": last_payslip.status
             }
 
-        # ===== NOTIFICATIONS =====
+        salary_trend_qs = Payslip.objects.filter(
+            employee=employee
+        ).order_by("-month")[:6]
+
+        salary_trend = [
+            {
+                "month": p.month.strftime("%b %Y"),
+                "net_salary": p.net_pay
+            }
+            for p in reversed(salary_trend_qs)
+        ]
+
+        # ---------------- NOTIFICATIONS ----------------
+
         notifications = Notification.objects.filter(
             user=user
         ).order_by("-created_at")[:5]
@@ -479,11 +534,13 @@ class EmployeeViewSet(ModelViewSet):
             "attendance": attendance,
             "leave": leave_summary,
             "payroll": payroll,
-            "notifications": notification_data
+            "notifications": notification_data,
+            "attendance_trend": attendance_trend,
+            "salary_trend": salary_trend
         })
 
     # =====================================================
-    # ONBOARDING EMAIL
+    # SEND ONBOARDING EMAIL
     # =====================================================
 
     def send_onboarding_email(self, employee, email, temp_password):
@@ -528,3 +585,148 @@ HR Team
 
         email_message.attach_alternative(html_content, "text/html")
         email_message.send(fail_silently=False)
+
+
+
+@api_view(["GET"])
+@permission_classes([IsEmployee])
+def employee_dashboard(request):
+
+    employee = request.user.employee_profile
+    today = timezone.now().date()
+    first_day_of_month = date(today.year, today.month, 1)
+
+    payslip = Payslip.objects.filter(
+        employee=employee,
+        month__year=today.year,
+        month__month=today.month
+    ).first()
+
+    # ==============================
+    # 1️⃣ LEAVE SUMMARY
+    # ==============================
+    leaves = LeaveRequest.objects.filter(employee=employee)
+
+    leave_summary = leaves.aggregate(
+        total=Count("id"),
+        pending=Count("id", filter=Q(status="PENDING")),
+        approved=Count("id", filter=Q(status="APPROVED")),
+        rejected=Count("id", filter=Q(status="REJECTED")),
+    )
+
+    pending_leaves = leave_summary.get("pending", 0) or 0
+
+    # ==============================
+    # 2️⃣ ATTENDANCE PERCENTAGE
+    # ==============================
+    year = today.year
+    month = today.month
+
+    attendance_records = Attendance.objects.filter(
+        employee=employee,
+        date__year=year,
+        date__month=month
+    )
+
+    total_present = attendance_records.filter(
+        status__in=["PRESENT", "PAID_LEAVE"]
+    ).count()
+
+    total_days = attendance_records.count()
+
+    attendance_percentage = 0
+
+    if total_days > 0:
+        attendance_percentage = round(
+            (total_present / total_days) * 100,
+            2
+        )
+
+    # ==============================
+    # 3️⃣ SALARY THIS MONTH
+    # ==============================
+    salary_this_month = 0
+
+    today = timezone.now().date()
+
+    payslip = Payslip.objects.filter(
+        employee=employee,
+        month__year=today.year,
+        month__month=today.month
+    ).first()
+
+    if payslip:
+        salary_this_month = payslip.net_pay
+
+    # ==============================
+    # 4️⃣ UNREAD NOTIFICATIONS
+    # ==============================
+    notifications_unread = Notification.objects.filter(
+        user=request.user,
+        is_read=False
+    ).count()
+
+    # ==============================
+    # FINAL RESPONSE
+    # ==============================
+    return Response({
+        "leave_summary": leave_summary,
+        "attendance_percentage": attendance_percentage,
+        "pending_leaves": pending_leaves,
+        "salary_this_month": salary_this_month,
+        "notifications_unread": notifications_unread
+    })
+
+def create(self, request, *args, **kwargs):
+
+    salary_data = request.data.get("salary")
+
+    if salary_data:
+        import json
+        salary_data = json.loads(salary_data)
+
+    serializer = self.get_serializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    employee = serializer.save()
+
+    # 🔥 CREATE SALARY
+    if salary_data:
+        from apps.payroll.models import Salary
+
+        Salary.objects.create(
+            employee=employee,
+            **salary_data
+        )
+
+    return Response(serializer.data)
+
+
+def update(self, request, *args, **kwargs):
+
+    salary_data = request.data.get("salary")
+
+    if salary_data:
+        import json
+        salary_data = json.loads(salary_data)
+
+    partial = kwargs.pop("partial", False)
+    instance = self.get_object()
+
+    serializer = self.get_serializer(instance, data=request.data, partial=partial)
+    serializer.is_valid(raise_exception=True)
+
+    employee = serializer.save()
+
+    # 🔥 UPDATE SALARY
+    if salary_data:
+        from apps.payroll.models import Salary
+
+        salary_obj, created = Salary.objects.get_or_create(employee=employee)
+
+        for key, value in salary_data.items():
+            setattr(salary_obj, key, value)
+
+        salary_obj.save()
+
+    return Response(serializer.data)

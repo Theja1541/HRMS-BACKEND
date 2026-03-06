@@ -1,7 +1,36 @@
 from calendar import monthrange
 from decimal import Decimal
 from apps.attendance.models import Attendance
+from .models import PayrollMonth
+from datetime import date
 
+
+# ==========================================================
+# PAYROLL MONTH LOCK CHECK
+# ==========================================================
+
+def is_payroll_closed(year, month):
+    return PayrollMonth.objects.filter(
+        year=year,
+        month=month,
+        status="CLOSED"
+    ).exists()
+
+# ==========================================================
+# SUPER ADMIN CHECK
+# ==========================================================
+
+def is_super_admin(user):
+    return (
+        user.is_authenticated and
+        hasattr(user, "role") and
+        user.role == "SUPER_ADMIN"
+    )
+
+
+# ==========================================================
+# ATTENDANCE SUMMARY
+# ==========================================================
 
 def get_attendance_summary(employee, year, month):
 
@@ -24,6 +53,10 @@ def get_attendance_summary(employee, year, month):
         "absent_days": absent_days,
     }
 
+
+# ==========================================================
+# PAYABLE SALARY CALCULATION
+# ==========================================================
 
 def calculate_payable_salary(employee, salary, year, month):
 
@@ -49,3 +82,15 @@ def calculate_payable_salary(employee, salary, year, month):
         "per_day_salary": per_day_salary.quantize(Decimal("0.01")),
         "payable_salary": payable_salary.quantize(Decimal("0.01")),
     }
+
+
+def get_current_salary(employee):
+
+    today = date.today()
+
+    return (
+        employee.salary_revisions
+        .filter(effective_from__lte=today)
+        .order_by("-effective_from")
+        .first()
+    )

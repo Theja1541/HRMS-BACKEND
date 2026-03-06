@@ -1,5 +1,13 @@
 from rest_framework import serializers
 from .models import Employee, EmployeeHistory
+from apps.payroll.models import Salary
+from django.db import transaction
+import json
+from rest_framework import serializers
+from django.db import transaction
+from decimal import Decimal
+from apps.payroll.serializers import SalarySerializer
+from apps.payroll.serializers import SalaryRevisionSerializer
 
 
 # ============================================================
@@ -19,7 +27,6 @@ class EmployeeHistorySerializer(serializers.ModelSerializer):
             "changed_by",
         ]
 
-
 # ============================================================
 # EMPLOYEE LIST SERIALIZER (Lightweight – For Table View)
 # ============================================================
@@ -30,15 +37,8 @@ class EmployeeListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Employee
-        fields = [
-            "id",
-            "employee_id",
-            "full_name",
-            "email",
-            "mobile",
-            "department",
-            "status",
-        ]
+        fields = "__all__"
+        
 
     def get_full_name(self, obj):
         return f"{obj.first_name} {obj.last_name or ''}".strip()
@@ -51,18 +51,26 @@ class EmployeeListSerializer(serializers.ModelSerializer):
 # EMPLOYEE DETAIL SERIALIZER (Full Profile View)
 # ============================================================
 
+
 class EmployeeDetailSerializer(serializers.ModelSerializer):
+
     full_name = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     history = EmployeeHistorySerializer(many=True, read_only=True)
 
+    # ❗ REMOVE read_only=True
+    # salary = SalarySerializer(required=False)
+    salary = SalarySerializer(read_only=True)
+
+    salary_history = SalaryRevisionSerializer(
+    source="salary_revisions",
+    many=True,
+    read_only=True
+)
+
     class Meta:
         model = Employee
         fields = "__all__"
-
-    # ------------------------------
-    # Computed Fields
-    # ------------------------------
 
     def get_full_name(self, obj):
         return f"{obj.first_name} {obj.last_name or ''}".strip()
@@ -70,38 +78,59 @@ class EmployeeDetailSerializer(serializers.ModelSerializer):
     def get_status(self, obj):
         return "Active" if obj.is_active else "Inactive"
 
-    # ------------------------------
-    # Validation (Manual Employee ID)
-    # ------------------------------
 
-    def validate_employee_id(self, value):
-        if not value:
-            raise serializers.ValidationError(
-                "Employee ID is required."
-            )
+    # ================= CREATE =================
 
-        # Check uniqueness manually (important for update)
-        qs = Employee.objects.filter(employee_id=value)
+    @transaction.atomic
+    def create(self, validated_data):
 
-        if self.instance:
-            qs = qs.exclude(id=self.instance.id)
+        salary_data = validated_data.pop("salary", None)
 
-        if qs.exists():
-            raise serializers.ValidationError(
-                "Employee ID already exists."
-            )
+        if isinstance(salary_data, str):
+            salary_data = json.loads(salary_data)
 
-        return value
+        employee = Employee.objects.create(**validated_data)
 
-    def validate_email(self, value):
-        qs = Employee.objects.filter(email=value)
+        if salary_data:
+            from decimal import Decimal
 
-        if self.instance:
-            qs = qs.exclude(id=self.instance.id)
+            cleaned_salary = {
+                k: Decimal(v) if v not in ["", None] else Decimal("0")
+                for k, v in salary_data.items()
+            }
 
-        if qs.exists():
-            raise serializers.ValidationError(
-                "Email already exists."
-            )
+            Salary.objects.create(employee=employee, **cleaned_salary)
 
-        return value
+        return employee
+
+
+    # ================= UPDATE =================
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+
+        request = self.context.get("request")
+
+        salary_data = request.data.get("salary")
+
+        if salary_data:
+            salary_data = json.loads(salary_data)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+
+        if salary_data:
+            salary_obj, created = Salary.objects.get_or_create(employee=instance)
+
+            for attr, value in salary_data.items():
+                setattr(
+                    salary_obj,
+                    attr,
+                    Decimal(value) if value not in ["", None] else Decimal("0")
+                )
+
+            salary_obj.save()
+
+        return instance

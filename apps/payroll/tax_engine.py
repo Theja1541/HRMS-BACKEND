@@ -1,6 +1,5 @@
 from decimal import Decimal
 
-
 def calculate_new_regime_tax(annual_income):
 
     tax = Decimal("0")
@@ -62,18 +61,22 @@ def calculate_old_regime_tax(annual_income):
 
 def calculate_monthly_tds(employee, annual_gross):
 
-    salary = employee.salary
-
     # Standard deduction
     taxable_income = annual_gross - Decimal("50000")
 
-    if salary.tax_regime == "NEW":
+    if taxable_income < 0:
+        taxable_income = Decimal("0")
+
+    # Get employee tax regime safely
+    tax_regime = getattr(employee, "tax_regime", "NEW")
+
+    if tax_regime == "NEW":
         annual_tax = calculate_new_regime_tax(taxable_income)
     else:
-        # Simplified old regime (without investment logic yet)
+        # simplified old regime (no investments yet)
         annual_tax = calculate_old_regime_tax(taxable_income)
 
-    # 4% cess
+    # 4% health & education cess
     annual_tax += annual_tax * Decimal("0.04")
 
     monthly_tds = annual_tax / Decimal("12")
