@@ -21,3 +21,5 @@ class LeaveRequestAdmin(admin.ModelAdmin):
 @admin.register(LeaveApprovalLog)
 class LeaveApprovalLogAdmin(admin.ModelAdmin):
     list_display = ("leave_request", "action", "performed_by", "performed_at")
+
+#hai frpm anilkumar
