@@ -91,7 +91,6 @@ class Employee(models.Model):
     # ============================================================
 
     pf_applicable = models.BooleanField(default=False)
-    uan_number = models.CharField(max_length=25, blank=True)
 
     esi_applicable = models.BooleanField(default=False)
     esi_number = models.CharField(max_length=25, blank=True)
@@ -116,46 +115,52 @@ class Employee(models.Model):
     # ============================================================
 
     profile_photo = models.ImageField(
-        upload_to="employees/profile_photos/",
-        null=True,
-        blank=True
-    )
+            upload_to="employees/profile_photos/",
+            null=True,
+            blank=True
+        )
 
     resume = models.FileField(
-        upload_to="employees/resumes/",
-        null=True,
-        blank=True
-    )
+            upload_to="employees/resumes/",
+            null=True,
+            blank=True
+        )
 
     offer_letter = models.FileField(
-        upload_to="employees/offer_letters/",
-        null=True,
-        blank=True
-    )
+            upload_to="employees/offer_letters/",
+            null=True,
+            blank=True
+        )
 
-    id_proof = models.FileField(
-        upload_to="employees/id_proofs/",
-        null=True,
-        blank=True
-    )
+    aadhar_card = models.FileField(
+            upload_to="employees/aadhar_cards/",
+            null=True,
+            blank=True
+        )
+
+    pan_card = models.FileField(
+            upload_to="employees/pan_cards/",
+            null=True,
+            blank=True
+        )
 
     address_proof = models.FileField(
-        upload_to="employees/address_proofs/",
-        null=True,
-        blank=True
-    )
+            upload_to="employees/address_proofs/",
+            null=True,
+            blank=True
+        )
 
     education_cert = models.FileField(
-        upload_to="employees/education_certificates/",
-        null=True,
-        blank=True
-    )
+            upload_to="employees/education_certificates/",
+            null=True,
+            blank=True
+        )
 
     experience_cert = models.FileField(
-        upload_to="employees/experience_certificates/",
-        null=True,
-        blank=True
-    )
+            upload_to="employees/experience_certificates/",
+            null=True,
+            blank=True
+        )
 
     work_calendar = models.ForeignKey(
     "attendance.WorkCalendar",

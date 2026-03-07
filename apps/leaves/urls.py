@@ -13,5 +13,6 @@ urlpatterns = [
     path("my-balance/", views.my_leave_balance),
     path("all/", views.all_leave_requests),
     path("me/", views.my_leaves),
-    path("<int:leave_id>/cancel/", cancel_leave),
+    path("dashboard/", views.leave_dashboard),
+    path("calendar/", views.leave_calendar),
 ]

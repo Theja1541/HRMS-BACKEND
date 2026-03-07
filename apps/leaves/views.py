@@ -6,6 +6,7 @@ from apps.employees.models import Employee
 from .models import LeaveRequest, LeaveBalance, LeaveType, LeaveApprovalLog
 from .serializers import LeaveRequestSerializer, LeaveBalanceSerializer
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from apps.accounts.permissions import IsEmployee, IsHR
 from .models import LeaveType
@@ -19,6 +20,55 @@ from apps.accounts.permissions import IsEmployee
 from .utils import sync_leave_to_attendance
 from apps.attendance.models import Attendance
 from apps.leaves.services.leave_service import LeaveService
+
+from django.db.models import Count
+from django.utils.timezone import now
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+
+from .models import LeaveRequest
+
+
+@api_view(["GET"])
+def leave_dashboard(request):
+
+    today = now().date()
+
+    total = LeaveRequest.objects.count()
+
+    pending = LeaveRequest.objects.filter(status="PENDING").count()
+
+    approved = LeaveRequest.objects.filter(status="APPROVED").count()
+
+    rejected = LeaveRequest.objects.filter(status="REJECTED").count()
+
+    today_leaves = LeaveRequest.objects.filter(
+        start_date__lte=today,
+        end_date__gte=today,
+        status="APPROVED"
+    ).values(
+        "employee__first_name",
+        "employee__last_name",
+        "leave_type__name",
+        "start_date",
+        "end_date"
+    )
+
+    recent = LeaveRequest.objects.order_by("-created_at")[:5].values(
+        "employee__first_name",
+        "leave_type__name",
+        "status",
+        "start_date"
+    )
+
+    return Response({
+        "total_requests": total,
+        "pending_requests": pending,
+        "approved_requests": approved,
+        "rejected_requests": rejected,
+        "today_leaves": list(today_leaves),
+        "recent_requests": list(recent),
+    })
 
 
 @api_view(["POST"])
@@ -118,8 +168,8 @@ def apply_leave(request):
 
     LeaveApprovalLog.objects.create(
         leave_request=leave,
-        action="APPLIED",
-        performed_by=request.user
+        performed_by=employee,
+        action="APPLIED"
     )
 
     return Response({"message": "Leave applied successfully"})
@@ -376,7 +426,7 @@ def cancel_leave(request, leave_id):
     LeaveApprovalLog.objects.create(
         leave_request=leave,
         action="CANCELLED",
-        performed_by=request.user
+        employee = Employee.objects.get(user=request.user)
     )
 
     return Response({"message": "Leave cancelled successfully"})
@@ -412,3 +462,115 @@ def reject_leave(request, leave_id):
     ).delete()
 
     return Response({"message": "Leave rejected successfully"})
+
+
+@api_view(["GET"])
+def leave_dashboard(request):
+
+    today = now().date()
+
+    total_requests = LeaveRequest.objects.count()
+
+    pending_requests = LeaveRequest.objects.filter(
+        status="PENDING"
+    ).count()
+
+    approved_requests = LeaveRequest.objects.filter(
+        status="APPROVED"
+    ).count()
+
+    rejected_requests = LeaveRequest.objects.filter(
+        status="REJECTED"
+    ).count()
+
+    today_leaves = LeaveRequest.objects.filter(
+        start_date__lte=today,
+        end_date__gte=today,
+        status="APPROVED"
+    ).values(
+        "employee__first_name",
+        "employee__last_name",
+        "leave_type__name",
+        "start_date",
+        "end_date"
+    )
+
+    recent_requests = LeaveRequest.objects.order_by(
+        "-created_at"
+    )[:5].values(
+        "employee__first_name",
+        "employee__last_name",
+        "leave_type__name",
+        "status",
+        "start_date"
+    )
+
+    return Response({
+        "total_requests": total_requests,
+        "pending_requests": pending_requests,
+        "approved_requests": approved_requests,
+        "rejected_requests": rejected_requests,
+        "today_leaves": list(today_leaves),
+        "recent_requests": list(recent_requests)
+    })
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from .models import LeaveRequest, Holiday
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def leave_calendar(request):
+
+    employee_id = request.GET.get("employee_id")
+
+    # Base query
+    leaves = LeaveRequest.objects.filter(status="APPROVED").select_related(
+        "employee", "leave_type"
+    )
+
+    # ⭐ Employee filter
+    if employee_id and employee_id != "":
+        leaves = leaves.filter(employee__id=int(employee_id))
+
+    events = []
+
+    for leave in leaves:
+
+        avatar = None
+        if leave.employee.profile_photo:
+            avatar = request.build_absolute_uri(
+                leave.employee.profile_photo.url
+            )
+
+        events.append({
+            "type": "leave",
+            "title": f"{leave.employee.first_name} {leave.employee.last_name}",
+            "start": leave.start_date,
+            "end": leave.end_date,
+            "leave_type": leave.leave_type.name,
+            "avatar": avatar,
+            "department": leave.employee.department
+        })
+
+    return Response(events)
+
+@api_view(["PUT"])
+def update_leave_dates(request):
+
+    employee = request.data.get("employee")
+    start = request.data.get("start_date")
+    end = request.data.get("end_date")
+
+    leave = LeaveRequest.objects.filter(
+        employee__first_name__icontains=employee
+    ).first()
+
+    leave.start_date = start
+    leave.end_date = end
+    leave.save()
+
+    return Response({"status":"updated"})
