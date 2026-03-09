@@ -1,64 +1,140 @@
-from django.utils import timezone
-from django.db import transaction
 from decimal import Decimal
+from datetime import date
+from django.db import transaction
 from apps.leaves.models import LeaveType, LeaveBalance, LeaveAccrualLog
 from apps.employees.models import Employee
 
 
-@transaction.atomic
-def run_earned_leave_accrual():
-
-    today = timezone.now().date()
-    year = today.year
-    month = today.month
-
-    try:
-        earned_leave = LeaveType.objects.get(name="Earned Leave", is_active=True)
-    except LeaveType.DoesNotExist:
-        return "Earned Leave not configured"
-
-    monthly_credit = Decimal(earned_leave.annual_quota) / Decimal(12)
-
+def credit_monthly_leaves():
+    """
+    Credit monthly accrued leaves to all active employees.
+    Run this on 1st of every month via Celery Beat.
+    """
+    today = date.today()
+    current_year = today.year
+    current_month = today.month
+    
+    leave_types = LeaveType.objects.filter(
+        accrual_type="MONTHLY",
+        is_active=True
+    )
+    
     employees = Employee.objects.filter(is_active=True)
+    
+    credited_count = 0
+    
+    with transaction.atomic():
+        for leave_type in leave_types:
+            monthly_credit = leave_type.annual_quota / Decimal("12")
+            
+            for employee in employees:
+                # Skip if joined after this month
+                if employee.joining_date and employee.joining_date.year == current_year:
+                    if employee.joining_date.month > current_month:
+                        continue
+                
+                # Check if already credited
+                already_credited = LeaveAccrualLog.objects.filter(
+                    employee=employee,
+                    leave_type=leave_type,
+                    year=current_year,
+                    month=current_month
+                ).exists()
+                
+                if already_credited:
+                    continue
+                
+                # Get or create balance
+                balance, created = LeaveBalance.objects.get_or_create(
+                    employee=employee,
+                    leave_type=leave_type,
+                    year=current_year,
+                    defaults={"total_allocated": Decimal("0")}
+                )
+                
+                # Credit leaves
+                balance.total_allocated += monthly_credit
+                balance.save()
+                
+                # Log accrual
+                LeaveAccrualLog.objects.create(
+                    employee=employee,
+                    leave_type=leave_type,
+                    year=current_year,
+                    month=current_month,
+                    credited_days=monthly_credit
+                )
+                
+                credited_count += 1
+    
+    return credited_count
 
-    for employee in employees:
 
-        # Prevent duplicate accrual in same month
-        already_credited = LeaveAccrualLog.objects.filter(
-            employee=employee,
-            leave_type=earned_leave,
-            year=year,
-            month=month
-        ).exists()
+def credit_annual_leaves():
+    """
+    Credit annual leaves to all active employees on Jan 1st.
+    """
+    today = date.today()
+    current_year = today.year
+    
+    leave_types = LeaveType.objects.filter(
+        accrual_type="ANNUAL",
+        is_active=True
+    )
+    
+    employees = Employee.objects.filter(is_active=True)
+    
+    credited_count = 0
+    
+    with transaction.atomic():
+        for leave_type in leave_types:
+            for employee in employees:
+                # Skip if joined after this year
+                if employee.joining_date and employee.joining_date.year > current_year:
+                    continue
+                
+                # Check if already credited
+                balance = LeaveBalance.objects.filter(
+                    employee=employee,
+                    leave_type=leave_type,
+                    year=current_year
+                ).first()
+                
+                if balance and balance.total_allocated > 0:
+                    continue
+                
+                # Create or update balance
+                balance, created = LeaveBalance.objects.get_or_create(
+                    employee=employee,
+                    leave_type=leave_type,
+                    year=current_year,
+                    defaults={"total_allocated": leave_type.annual_quota}
+                )
+                
+                if not created and balance.total_allocated == 0:
+                    balance.total_allocated = leave_type.annual_quota
+                    balance.save()
+                
+                # Log accrual
+                LeaveAccrualLog.objects.create(
+                    employee=employee,
+                    leave_type=leave_type,
+                    year=current_year,
+                    month=1,
+                    credited_days=leave_type.annual_quota
+                )
+                
+                credited_count += 1
+    
+    return credited_count
 
-        if already_credited:
-            continue
 
-        balance, _ = LeaveBalance.objects.select_for_update().get_or_create(
-            employee=employee,
-            leave_type=earned_leave,
-            year=year,
-            defaults={
-                "total_allocated": 0,
-                "used": 0,
-            }
-        )
-
-        if balance.total_allocated < earned_leave.annual_quota:
-
-            balance.total_allocated += monthly_credit
-
-            if balance.total_allocated > earned_leave.annual_quota:
-                balance.total_allocated = earned_leave.annual_quota
-
-            balance.save(update_fields=["total_allocated"])
-
-            LeaveAccrualLog.objects.create(
-                employee=employee,
-                leave_type=earned_leave,
-                year=year,
-                month=month,
-                credited_days=monthly_credit
-            )
-
-    return "Earned Leave monthly accrual completed"
+def get_employee_accrual_history(employee, leave_type, year):
+    """
+    Get accrual history for an employee.
+    """
+    return LeaveAccrualLog.objects.filter(
+        employee=employee,
+        leave_type=leave_type,
+        year=year
+    ).order_by("month")

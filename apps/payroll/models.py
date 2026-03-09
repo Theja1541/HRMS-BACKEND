@@ -423,7 +423,7 @@ class Salary(models.Model):
 class Payslip(models.Model):
 
     STATUS_CHOICES = [
-        ("DRAFT", "Draft"),
+        ("NOT PAID", "Not Paid"),
         ("APPROVED", "Approved"),
         ("PAID", "Paid"),
         ("CANCELLED", "Cancelled"),
@@ -471,7 +471,7 @@ class Payslip(models.Model):
 
     net_pay = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="DRAFT")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="NOT PAID")
 
     paid_on = models.DateTimeField(null=True, blank=True)
 
@@ -540,7 +540,7 @@ class ProfessionalTaxSlab(models.Model):
 class FullFinalSettlement(models.Model):
 
     STATUS_CHOICES = (
-        ("DRAFT", "Draft"),
+        ("NOT PAID", "Not Paid"),
         ("APPROVED", "Approved"),
         ("PAID", "Paid"),
     )
@@ -559,7 +559,7 @@ class FullFinalSettlement(models.Model):
 
     final_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="DRAFT")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="NOT PAID")
 
     created_at = models.DateTimeField(auto_now_add=True)
 

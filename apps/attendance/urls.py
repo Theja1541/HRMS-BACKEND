@@ -14,6 +14,7 @@ from .views import (
 )
 
 from .views import generate_today_attendance
+from .views import edited_attendance_history
 
 
 urlpatterns = [
@@ -32,6 +33,7 @@ urlpatterns = [
 ),
     path("send-monthly-email/", send_attendance_now),
     path("generate-today/", generate_today_attendance),
+    path("edited-history/", edited_attendance_history),
 
 ]
 
