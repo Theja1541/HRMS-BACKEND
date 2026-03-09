@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Employee, EmployeeHistory
+from .models import Employee, EmployeeHistory, CustomRole, CustomDepartment
 
 
 @admin.register(Employee)
@@ -36,3 +36,15 @@ class EmployeeHistoryAdmin(admin.ModelAdmin):
     )
     search_fields = ("employee__employee_id", "field_name")
     ordering = ("-changed_at",)
+
+
+@admin.register(CustomRole)
+class CustomRoleAdmin(admin.ModelAdmin):
+    list_display = ("name", "created_at")
+    search_fields = ("name",)
+
+
+@admin.register(CustomDepartment)
+class CustomDepartmentAdmin(admin.ModelAdmin):
+    list_display = ("name", "created_at")
+    search_fields = ("name",)

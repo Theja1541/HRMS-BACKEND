@@ -21,7 +21,7 @@ class IsHR(BasePermission):
     def has_permission(self, request, view):
         return (
             request.user.is_authenticated and
-            request.user.role.upper() in ["HR", "ADMIN"]
+            request.user.role.upper() in ["HR", "ADMIN", "SUPER_ADMIN"]
         )
 
 
@@ -30,4 +30,12 @@ class IsEmployee(BasePermission):
         return (
             request.user.is_authenticated and
             request.user.role.upper() == "EMPLOYEE"
+        )
+
+
+class IsAdminOrHR(BasePermission):
+    def has_permission(self, request, view):
+        return (
+            request.user.is_authenticated and
+            request.user.role.upper() in ["ADMIN", "HR", "SUPER_ADMIN"]
         )

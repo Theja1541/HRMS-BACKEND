@@ -38,6 +38,7 @@ urlpatterns = [
     # Email
     path("payslip/email/single/", views.send_single_payslip_email),
     path("payslip/email/bulk/", views.bulk_email_payslips),
+    path("email/dashboard/", views.email_dashboard),
 
     # Payroll
     path("status/", views.payroll_status),
@@ -67,5 +68,6 @@ urlpatterns = [
     path("summary/", payroll_summary, name="payroll-summary"),
     path("export/excel/", export_payroll_excel, name="export-payroll-excel"),
     path("export/pdf/", export_payroll_pdf, name="export-payroll-pdf"),
+    path("export-salary-bank-file/", views.export_salary_bank_file, name="export-salary-bank-file"),
 
 ]

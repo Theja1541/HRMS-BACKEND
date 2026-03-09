@@ -44,10 +44,7 @@ class LeaveBalanceSerializer(serializers.ModelSerializer):
 
 class LeaveRequestSerializer(serializers.ModelSerializer):
 
-    employee_name = serializers.CharField(
-        source="employee.user.username",
-        read_only=True
-    )
+    employee_name = serializers.SerializerMethodField()
 
     leave_type_name = serializers.CharField(
         source="leave_type.name",
@@ -55,10 +52,17 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
     )
 
     total_days = serializers.SerializerMethodField()
+    days = serializers.SerializerMethodField()
 
     class Meta:
         model = LeaveRequest
         fields = "__all__"
 
+    def get_employee_name(self, obj):
+        return f"{obj.employee.first_name} {obj.employee.last_name}".strip()
+
     def get_total_days(self, obj):
         return obj.total_days()
+    
+    def get_days(self, obj):
+        return float(obj.total_days())

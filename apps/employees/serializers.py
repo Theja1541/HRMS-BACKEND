@@ -3,8 +3,7 @@ from .models import Employee, EmployeeHistory
 from apps.payroll.models import Salary
 from django.db import transaction
 import json
-from rest_framework import serializers
-from django.db import transaction
+import decimal
 from decimal import Decimal
 from apps.payroll.serializers import SalarySerializer
 from apps.payroll.serializers import SalaryRevisionSerializer
@@ -113,7 +112,7 @@ class EmployeeDetailSerializer(serializers.ModelSerializer):
 
         salary_data = request.data.get("salary")
 
-        if salary_data:
+        if salary_data and isinstance(salary_data, str):
             salary_data = json.loads(salary_data)
 
         for attr, value in validated_data.items():
@@ -121,15 +120,15 @@ class EmployeeDetailSerializer(serializers.ModelSerializer):
 
         instance.save()
 
-        if salary_data:
+        if salary_data and isinstance(salary_data, dict):
             salary_obj, created = Salary.objects.get_or_create(employee=instance)
 
             for attr, value in salary_data.items():
-                setattr(
-                    salary_obj,
-                    attr,
-                    Decimal(value) if value not in ["", None] else Decimal("0")
-                )
+                try:
+                    decimal_value = Decimal(str(value)) if value not in ["", None] else Decimal("0")
+                    setattr(salary_obj, attr, decimal_value)
+                except (ValueError, TypeError, decimal.InvalidOperation):
+                    pass
 
             salary_obj.save()
 

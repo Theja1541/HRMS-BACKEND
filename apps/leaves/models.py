@@ -10,10 +10,28 @@ from apps.employees.models import Employee
 
 class LeaveType(models.Model):
 
+    ACCRUAL_CHOICES = (
+        ("ANNUAL", "Annual (All at once)"),
+        ("MONTHLY", "Monthly Accrual"),
+        ("QUARTERLY", "Quarterly Accrual"),
+    )
+
     name = models.CharField(max_length=100, unique=True)
     annual_quota = models.DecimalField(max_digits=6, decimal_places=2, default=0)
 
     is_paid = models.BooleanField(default=True)
+    
+    accrual_type = models.CharField(
+        max_length=20,
+        choices=ACCRUAL_CHOICES,
+        default="ANNUAL",
+        help_text="How leaves are credited to employees"
+    )
+    
+    accrual_start_month = models.IntegerField(
+        default=1,
+        help_text="Month when accrual starts (1=Jan, 12=Dec)"
+    )
 
     carry_forward = models.BooleanField(default=False)
     max_carry_forward = models.DecimalField(max_digits=6, decimal_places=2, default=0)
@@ -21,6 +39,11 @@ class LeaveType(models.Model):
     requires_approval = models.BooleanField(default=True)
     is_active = models.BooleanField(default=True)
     encashable = models.BooleanField(default=False)
+    
+    allow_negative_balance = models.BooleanField(
+        default=False,
+        help_text="Allow employees to take leave even if balance is insufficient (will become LOP)"
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 

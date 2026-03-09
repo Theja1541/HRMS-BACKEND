@@ -284,6 +284,19 @@ class Attendance(models.Model):
         choices=SOURCE_CHOICES,
         default="MANUAL")
 
+    # Edit tracking
+    is_edited = models.BooleanField(default=False)
+    edit_reason = models.TextField(blank=True, null=True)
+    edited_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="edited_attendances"
+    )
+    edited_at = models.DateTimeField(null=True, blank=True)
+    previous_status = models.CharField(max_length=20, blank=True, null=True)
+
     class Meta:
         unique_together = ("employee", "date")
         ordering = ["-date"]
