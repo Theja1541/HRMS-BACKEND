@@ -400,6 +400,21 @@ def my_leaves(request):
     return Response(serializer.data)
 
 
+@api_view(["GET"])
+@permission_classes([IsEmployee])
+def leave_detail(request, leave_id):
+
+    employee = request.user.employee_profile
+
+    try:
+        leave = LeaveRequest.objects.get(id=leave_id, employee=employee)
+    except LeaveRequest.DoesNotExist:
+        return Response({"error": "Leave not found"}, status=404)
+
+    serializer = LeaveRequestSerializer(leave)
+    return Response(serializer.data)
+
+
 @api_view(["POST"])
 @permission_classes([IsEmployee])
 @transaction.atomic

@@ -1,8 +1,6 @@
-# apps/leaves/urls.py
-
 from django.urls import path
 from . import views
-from .views import cancel_leave
+from .views import cancel_leave, leave_detail
 
 urlpatterns = [
     path("types/", views.leave_types),
@@ -12,6 +10,7 @@ urlpatterns = [
     path("approve/<int:leave_id>/", views.approve_leave),
     path("reject/<int:leave_id>/", views.reject_leave),
     path("cancel/<int:leave_id>/", views.cancel_leave),
+    path("detail/<int:leave_id>/", views.leave_detail),
     path("my-balance/", views.my_leave_balance),
     path("all/", views.all_leave_requests),
     path("requests/", views.all_leave_requests),
