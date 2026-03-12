@@ -6,19 +6,17 @@ from apps.employees.models import Employee
 from .models import LeaveRequest, LeaveBalance, LeaveType, LeaveApprovalLog
 from .serializers import LeaveRequestSerializer, LeaveBalanceSerializer
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from apps.accounts.permissions import IsEmployee, IsHR
-from .models import LeaveType
-from apps.leaves.models import LeaveRequest
 from datetime import timedelta
 from datetime import datetime
 from django.db.models import Q
 from apps.payroll.utils import is_payroll_closed, is_super_admin
-from apps.accounts.permissions import IsEmployee
-# from .services import sync_leave_to_attendance
 from .utils import sync_leave_to_attendance
 from apps.attendance.models import Attendance
 from apps.leaves.services.leave_service import LeaveService
+from django.db.models import Count
+from django.utils.timezone import now
 
 
 @api_view(["POST"])
@@ -118,8 +116,8 @@ def apply_leave(request):
 
     LeaveApprovalLog.objects.create(
         leave_request=leave,
-        action="APPLIED",
-        performed_by=request.user
+        performed_by=employee,
+        action="APPLIED"
     )
 
     return Response({"message": "Leave applied successfully"})
@@ -229,20 +227,33 @@ def my_leave_balance(request):
     employee = request.user.employee_profile
     year = timezone.now().year
 
-    leave_types = LeaveService.get_employee_balances(
-        employee=employee,
-        year=year
-    )
+    # Get all active leave types
+    leave_types = LeaveType.objects.filter(is_active=True)
 
-    data = [
-        {
+    data = []
+    for lt in leave_types:
+        # Get or create balance record with updated quota
+        balance, created = LeaveBalance.objects.get_or_create(
+            employee=employee,
+            leave_type=lt,
+            year=year,
+            defaults={
+                "total_allocated": lt.annual_quota,
+                "used": 0
+            }
+        )
+
+        # Sync quota if admin changed it
+        if balance.total_allocated != lt.annual_quota:
+            balance.total_allocated = lt.annual_quota
+            balance.save(update_fields=["total_allocated"])
+
+        data.append({
             "leave_type": lt.name,
-            "total_allocated": lt.total_allocated,
-            "used": lt.used,
-            "remaining": lt.total_allocated - lt.used,
-        }
-        for lt in leave_types
-    ]
+            "total_allocated": float(balance.total_allocated),
+            "used": float(balance.used),
+            "remaining": float(balance.total_allocated - balance.used),
+        })
 
     return Response(data)
 
@@ -250,9 +261,22 @@ def my_leave_balance(request):
 @api_view(["GET"])
 @permission_classes([IsHR])
 def all_leave_requests(request):
-
-    leaves = LeaveRequest.objects.all().order_by("-applied_on")
+    status_filter = request.GET.get('status', None)
+    
+    leaves = LeaveRequest.objects.all().select_related('employee', 'leave_type')
+    
+    if status_filter:
+        leaves = leaves.filter(status=status_filter.upper())
+    
+    leaves = leaves.order_by("-applied_on")
+    
+    # Debug logging
+    print(f"Total leaves found: {leaves.count()}")
+    for leave in leaves:
+        print(f"Leave ID: {leave.id}, Employee: {leave.employee.first_name} {leave.employee.last_name}, Status: {leave.status}")
+    
     serializer = LeaveRequestSerializer(leaves, many=True)
+    print(f"Serialized data: {serializer.data}")
     return Response(serializer.data)
 
 @api_view(["GET"])
@@ -264,12 +288,102 @@ def leave_types(request):
     {
         "id": t.id,
         "name": t.name,
-        "annual_quota": t.annual_quota,  # ✅ CORRECT
+        "annual_quota": t.annual_quota,
+        "is_paid": t.is_paid,
+        "accrual_type": t.accrual_type,
+        "carry_forward": t.carry_forward,
+        "max_carry_forward": t.max_carry_forward,
+        "encashable": t.encashable,
+        "requires_approval": t.requires_approval,
+        "allow_negative_balance": t.allow_negative_balance,
     }
     for t in types
 ]
 
     return Response(data)
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsHR])
+def manage_leave_types(request):
+    """
+    GET: List all leave types (including inactive)
+    POST: Create new leave type
+    """
+    if request.method == "GET":
+        types = LeaveType.objects.all().order_by("-is_active", "name")
+        data = [
+            {
+                "id": t.id,
+                "name": t.name,
+                "annual_quota": t.annual_quota,
+                "is_paid": t.is_paid,
+                "accrual_type": t.accrual_type,
+                "accrual_start_month": t.accrual_start_month,
+                "carry_forward": t.carry_forward,
+                "max_carry_forward": t.max_carry_forward,
+                "encashable": t.encashable,
+                "requires_approval": t.requires_approval,
+                "allow_negative_balance": t.allow_negative_balance,
+                "is_active": t.is_active,
+            }
+            for t in types
+        ]
+        return Response(data)
+    
+    elif request.method == "POST":
+        try:
+            leave_type = LeaveType.objects.create(
+                name=request.data.get("name"),
+                annual_quota=request.data.get("annual_quota", 0),
+                is_paid=request.data.get("is_paid", True),
+                accrual_type=request.data.get("accrual_type", "ANNUAL"),
+                accrual_start_month=request.data.get("accrual_start_month", 1),
+                carry_forward=request.data.get("carry_forward", False),
+                max_carry_forward=request.data.get("max_carry_forward", 0),
+                encashable=request.data.get("encashable", False),
+                requires_approval=request.data.get("requires_approval", True),
+                allow_negative_balance=request.data.get("allow_negative_balance", False),
+            )
+            return Response(
+                {"message": "Leave type created successfully", "id": leave_type.id},
+                status=201
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=400)
+
+
+@api_view(["PUT", "DELETE"])
+@permission_classes([IsHR])
+def update_leave_type(request, leave_type_id):
+    """
+    PUT: Update leave type
+    DELETE: Deactivate leave type
+    """
+    try:
+        leave_type = LeaveType.objects.get(id=leave_type_id)
+    except LeaveType.DoesNotExist:
+        return Response({"error": "Leave type not found"}, status=404)
+    
+    if request.method == "PUT":
+        leave_type.name = request.data.get("name", leave_type.name)
+        leave_type.annual_quota = request.data.get("annual_quota", leave_type.annual_quota)
+        leave_type.is_paid = request.data.get("is_paid", leave_type.is_paid)
+        leave_type.accrual_type = request.data.get("accrual_type", leave_type.accrual_type)
+        leave_type.accrual_start_month = request.data.get("accrual_start_month", leave_type.accrual_start_month)
+        leave_type.carry_forward = request.data.get("carry_forward", leave_type.carry_forward)
+        leave_type.max_carry_forward = request.data.get("max_carry_forward", leave_type.max_carry_forward)
+        leave_type.encashable = request.data.get("encashable", leave_type.encashable)
+        leave_type.requires_approval = request.data.get("requires_approval", leave_type.requires_approval)
+        leave_type.allow_negative_balance = request.data.get("allow_negative_balance", leave_type.allow_negative_balance)
+        leave_type.is_active = request.data.get("is_active", leave_type.is_active)
+        leave_type.save()
+        return Response({"message": "Leave type updated successfully"})
+    
+    elif request.method == "DELETE":
+        leave_type.is_active = False
+        leave_type.save()
+        return Response({"message": "Leave type deactivated successfully"})
 
 @api_view(["GET"])
 @permission_classes([IsEmployee])
@@ -283,6 +397,21 @@ def my_leaves(request):
 
     serializer = LeaveRequestSerializer(leaves, many=True)
 
+    return Response(serializer.data)
+
+
+@api_view(["GET"])
+@permission_classes([IsEmployee])
+def leave_detail(request, leave_id):
+
+    employee = request.user.employee_profile
+
+    try:
+        leave = LeaveRequest.objects.get(id=leave_id, employee=employee)
+    except LeaveRequest.DoesNotExist:
+        return Response({"error": "Leave not found"}, status=404)
+
+    serializer = LeaveRequestSerializer(leave)
     return Response(serializer.data)
 
 
@@ -376,7 +505,7 @@ def cancel_leave(request, leave_id):
     LeaveApprovalLog.objects.create(
         leave_request=leave,
         action="CANCELLED",
-        performed_by=request.user
+        employee = Employee.objects.get(user=request.user)
     )
 
     return Response({"message": "Leave cancelled successfully"})
@@ -400,15 +529,159 @@ def reject_leave(request, leave_id):
         return Response({"error": "Leave already processed"}, status=400)
 
     leave.status = "REJECTED"
-    leave.rejected_on = timezone.now()
-    leave.save(update_fields=["status", "rejected_on"])
+    leave.save(update_fields=["status"])
 
-    # Remove auto-created attendance
-    Attendance.objects.filter(
-        employee=leave.employee,
-        date__range=[leave.start_date, leave.end_date],
-        source="LEAVE_SYSTEM",
-        locked=False
-    ).delete()
+    LeaveApprovalLog.objects.create(
+        leave_request=leave,
+        action="REJECTED",
+        performed_by=(
+            request.user.employee_profile
+            if hasattr(request.user, "employee_profile")
+            else None
+        )
+    )
 
     return Response({"message": "Leave rejected successfully"})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def leave_dashboard(request):
+
+    today = now().date()
+
+    total_requests = LeaveRequest.objects.count()
+
+    pending_requests = LeaveRequest.objects.filter(
+        status="PENDING"
+    ).count()
+
+    approved_requests = LeaveRequest.objects.filter(
+        status="APPROVED"
+    ).count()
+
+    rejected_requests = LeaveRequest.objects.filter(
+        status="REJECTED"
+    ).count()
+
+    today_leaves = LeaveRequest.objects.filter(
+        start_date__lte=today,
+        end_date__gte=today,
+        status="APPROVED"
+    ).values(
+        "employee__first_name",
+        "employee__last_name",
+        "leave_type__name",
+        "start_date",
+        "end_date"
+    )
+
+    recent_requests = LeaveRequest.objects.order_by(
+        "-applied_on"
+    )[:5].values(
+        "employee__first_name",
+        "employee__last_name",
+        "leave_type__name",
+        "status",
+        "start_date"
+    )
+
+    return Response({
+        "total_requests": total_requests,
+        "pending_requests": pending_requests,
+        "approved_requests": approved_requests,
+        "rejected_requests": rejected_requests,
+        "today_leaves": list(today_leaves),
+        "recent_requests": list(recent_requests)
+    })
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from .models import LeaveRequest, Holiday
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def leave_calendar(request):
+
+    employee_id = request.GET.get("employee_id")
+
+    # Base query
+    leaves = LeaveRequest.objects.filter(status="APPROVED").select_related(
+        "employee", "leave_type"
+    )
+
+    # ⭐ Employee filter
+    if employee_id and employee_id != "":
+        leaves = leaves.filter(employee__id=int(employee_id))
+
+    events = []
+
+    for leave in leaves:
+
+        avatar = None
+        if leave.employee.profile_photo:
+            avatar = request.build_absolute_uri(
+                leave.employee.profile_photo.url
+            )
+
+        events.append({
+            "type": "leave",
+            "title": f"{leave.employee.first_name} {leave.employee.last_name}",
+            "start": leave.start_date,
+            "end": leave.end_date,
+            "leave_type": leave.leave_type.name,
+            "avatar": avatar,
+            "department": leave.employee.department
+        })
+
+    return Response(events)
+
+@api_view(["PUT"])
+def update_leave_dates(request):
+
+    employee = request.data.get("employee")
+    start = request.data.get("start_date")
+    end = request.data.get("end_date")
+
+    leave = LeaveRequest.objects.filter(
+        employee__first_name__icontains=employee
+    ).first()
+
+    leave.start_date = start
+    leave.end_date = end
+    leave.save()
+
+    return Response({"status":"updated"})
+
+
+@api_view(["GET"])
+def debug_leaves(request):
+    """Debug endpoint to check leave data"""
+    from django.forms.models import model_to_dict
+    
+    all_leaves = LeaveRequest.objects.all()
+    pending_leaves = LeaveRequest.objects.filter(status="PENDING")
+    
+    data = {
+        "total_leaves": all_leaves.count(),
+        "pending_leaves": pending_leaves.count(),
+        "leaves": []
+    }
+    
+    for leave in all_leaves[:10]:
+        data["leaves"].append({
+            "id": leave.id,
+            "employee": f"{leave.employee.first_name} {leave.employee.last_name}",
+            "employee_id": leave.employee.employee_id,
+            "leave_type": leave.leave_type.name,
+            "status": leave.status,
+            "start_date": str(leave.start_date),
+            "end_date": str(leave.end_date),
+            "reason": leave.reason,
+            "applied_on": str(leave.applied_on)
+        })
+    
+    return Response(data)

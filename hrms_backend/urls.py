@@ -54,6 +54,7 @@ urlpatterns = [
     path('api/audit/', include('apps.audit.urls')),
     path('api/notifications/', include('apps.notifications.urls')),
     path('api/payroll/', include('apps.payroll.urls')),
+    path('api/assets/', include('apps.assets.urls')),
 
     path("api/accounts/token/refresh/", TokenRefreshView.as_view()),
 ]

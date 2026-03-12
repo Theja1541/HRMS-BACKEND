@@ -38,6 +38,8 @@ from .views import (
     delete_user,
     superadmin_analytics,
     change_password,
+    change_password_with_old,
+    forgot_password,
 )
 
 
@@ -56,5 +58,7 @@ urlpatterns = [
     path("profile/", employee_profile, name="employee-profile"),
     path("analytics/", superadmin_analytics, name="analytics"),
     path("change-password/", change_password, name="change-password"),
+    path("change-password-with-old/", change_password_with_old, name="change-password-with-old"),
+    path("forgot-password/", forgot_password, name="forgot-password"),
     
 ]

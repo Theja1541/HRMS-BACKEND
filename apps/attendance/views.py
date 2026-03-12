@@ -74,8 +74,6 @@ def is_second_or_fourth_saturday(date_obj):
     return week_number in [2, 4]
 
 
-
-
 def calculate_working_days(year, month, employee=None):
 
     today = timezone.now().date()
@@ -304,13 +302,13 @@ def my_attendance(request):
     "summary": {
         "total_days_in_month": days_in_month,
         "working_days": working_days,
-        "holiday_days": holiday_days,
-        "present_days": present_days,
-        "half_days": half_days,
-        "paid_leave_days": paid_leave_days,
-        "unpaid_leave_days": unpaid_leave_days,
-        "absent_days": absent_days,
-        "late_days": late_days,
+        "holiday": holiday_days,
+        "present": present_days,
+        "half_day": half_days,
+        "paid_leave": paid_leave_days,
+        "unpaid_leave": unpaid_leave_days,
+        "absent": absent_days,
+        "late": late_days,
         "payable_days": payable_days,
         "deductible_days": deductible_days,
         "attendance_percentage": attendance_percentage,
@@ -447,6 +445,7 @@ def mark_attendance(request):
     date_value = request.data.get("date")  # YYYY-MM-DD
     status_value = request.data.get("status")  # PRESENT / ABSENT / LEAVE etc.
     check_in_value = request.data.get("check_in")  # Optional (ISO format)
+    edit_reason = request.data.get("edit_reason")  # Required for edits
 
     # ============================
     # VALIDATION
@@ -455,6 +454,12 @@ def mark_attendance(request):
     if not employee_id or not date_value or not status_value:
         return Response(
             {"error": "employee_id, date and status are required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not edit_reason:
+        return Response(
+            {"error": "edit_reason is required"},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -496,7 +501,18 @@ def mark_attendance(request):
         date=parsed_date
     )
 
+    # Store previous status for edit tracking
+    previous_status = attendance.status if not created else None
+
     attendance.status = status_value.upper()
+
+    # Track edit
+    if not created:
+        attendance.is_edited = True
+        attendance.edit_reason = edit_reason
+        attendance.edited_by = request.user
+        attendance.edited_at = timezone.now()
+        attendance.previous_status = previous_status
 
     # Reset late data
     attendance.is_late = False
@@ -581,10 +597,17 @@ def mark_attendance(request):
 def bulk_mark_attendance(request):
     date_value = request.data.get("date")
     status_value = request.data.get("status")
+    edit_reason = request.data.get("edit_reason")  # Required
 
     if not date_value or not status_value:
         return Response(
             {"error": "date and status required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not edit_reason:
+        return Response(
+            {"error": "edit_reason is required"},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -611,18 +634,34 @@ def bulk_mark_attendance(request):
 
     employees = Employee.objects.filter(is_active=True)
 
-    attendances = [
-        Attendance(employee=emp, date=parsed_date, status=status_value.upper())
-        for emp in employees
-    ]
+    updated_count = 0
+    created_count = 0
 
-    Attendance.objects.bulk_create(
-        attendances,
-        ignore_conflicts=True
-    )
+    for emp in employees:
+        attendance, created = Attendance.objects.get_or_create(
+            employee=emp,
+            date=parsed_date,
+            defaults={"status": status_value.upper()}
+        )
+
+        if not created:
+            attendance.previous_status = attendance.status
+            attendance.status = status_value.upper()
+            attendance.is_edited = True
+            attendance.edit_reason = edit_reason
+            attendance.edited_by = request.user
+            attendance.edited_at = timezone.now()
+            attendance.save()
+            updated_count += 1
+        else:
+            created_count += 1
 
     return Response(
-        {"message": "Bulk attendance marked successfully"},
+        {
+            "message": "Bulk attendance marked successfully",
+            "created": created_count,
+            "updated": updated_count
+        },
         status=status.HTTP_200_OK
     )
 
@@ -827,3 +866,55 @@ def generate_today_attendance(request):
         },
         status=status.HTTP_200_OK
     )
+
+
+@api_view(["GET"])
+@permission_classes([IsHR])
+def edited_attendance_history(request):
+    """Get all edited attendance records for a specific month"""
+    month = request.query_params.get("month")
+
+    if not month:
+        return Response(
+            {"error": "month query param required (YYYY-MM)"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        validate_month_format(month)
+        year, month_num = map(int, month.split("-"))
+    except (ValueError, ValidationError):
+        return Response(
+            {"error": "Invalid month format. Use YYYY-MM"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    edited_records = Attendance.objects.filter(
+        date__year=year,
+        date__month=month_num,
+        is_edited=True
+    ).select_related("employee", "edited_by").order_by("-edited_at")
+
+    data = []
+    for record in edited_records:
+        # Get edited_by name
+        if record.edited_by:
+            edited_by_name = f"{record.edited_by.first_name} {record.edited_by.last_name}".strip()
+            if not edited_by_name:
+                edited_by_name = record.edited_by.username
+        else:
+            edited_by_name = "System"
+
+        data.append({
+            "id": record.id,
+            "employee_name": f"{record.employee.first_name} {record.employee.last_name}",
+            "employee_id": record.employee.employee_id,
+            "date": record.date,
+            "previous_status": record.previous_status,
+            "updated_status": record.status,
+            "edited_by": edited_by_name,
+            "edit_reason": record.edit_reason,
+            "edited_at": record.edited_at,
+        })
+
+    return Response(data, status=status.HTTP_200_OK)

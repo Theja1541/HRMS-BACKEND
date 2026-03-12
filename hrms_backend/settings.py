@@ -28,7 +28,7 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DEBUG") == "True"
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -51,9 +51,10 @@ INSTALLED_APPS = [
     'apps.payroll.apps.PayrollConfig',
     'apps.daybook.apps.DaybookConfig',
     'apps.audit',
+    'apps.assets.apps.AssetsConfig',
     'rest_framework_simplejwt.token_blacklist',
-    "django_celery_beat",
-    "channels",
+    # "django_celery_beat",
+    # "channels",
     'apps.notifications.apps.NotificationsConfig',
 ]
 
@@ -155,6 +156,7 @@ AUTH_USER_MODEL = "accounts.User"
 
 
 from datetime import timedelta
+from celery.schedules import crontab
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
@@ -185,11 +187,8 @@ AUTHENTICATION_BACKENDS = [
 
 CACHES = {
     "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": "redis://127.0.0.1:6379/1",
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
-        }
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "unique-snowflake",
     }
 }
 
@@ -222,6 +221,14 @@ CELERY_BEAT_SCHEDULE = {
     "retry-failed-emails-every-5-minutes": {
         "task": "apps.payroll.tasks.retry_failed_emails",
         "schedule": 300.0,
+    },
+    "credit-monthly-leaves": {
+        "task": "apps.leaves.tasks.credit_monthly_leaves_task",
+        "schedule": crontab(day_of_month=1, hour=0, minute=0),
+    },
+    "credit-annual-leaves": {
+        "task": "apps.leaves.tasks.credit_annual_leaves_task",
+        "schedule": crontab(month_of_year=1, day_of_month=1, hour=0, minute=0),
     },
 }
 

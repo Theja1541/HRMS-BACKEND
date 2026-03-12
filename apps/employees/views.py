@@ -274,11 +274,26 @@ class EmployeeViewSet(ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        is_active = self.request.query_params.get('is_active', 'true')
+        role_filter = self.request.query_params.get('role', None)
 
         if user.role == "EMPLOYEE":
             return Employee.objects.filter(user=user, is_active=True).select_related("salary")
 
-        return Employee.objects.filter(is_active=True).select_related("user", "salary")
+        # For activate action, we need to access inactive employees
+        if self.action == 'activate':
+            return Employee.objects.filter(is_active=False).select_related("user", "salary")
+
+        if is_active.lower() == 'false':
+            queryset = Employee.objects.filter(is_active=False).select_related("user", "salary")
+        else:
+            queryset = Employee.objects.filter(is_active=True).select_related("user", "salary")
+        
+        # Filter by role if provided
+        if role_filter:
+            queryset = queryset.filter(designation__icontains=role_filter)
+        
+        return queryset
     # =====================================================
     # SERIALIZER
     # =====================================================
@@ -305,6 +320,7 @@ class EmployeeViewSet(ModelViewSet):
     def perform_create(self, serializer):
 
         email = serializer.validated_data.get("email")
+        role = self.request.data.get("role", "EMPLOYEE")
 
         if User.objects.filter(username=email).exists():
             raise ValidationError("User with this email already exists.")
@@ -318,7 +334,7 @@ class EmployeeViewSet(ModelViewSet):
             user = User.objects.create(
                 username=email,
                 email=email,
-                role="EMPLOYEE",
+                role=role,
                 password=make_password(temp_password),
                 must_change_password=True,
             )
@@ -343,17 +359,27 @@ class EmployeeViewSet(ModelViewSet):
         request = self.request
         salary_data = request.data.get("salary")
 
-        if salary_data:
+        if salary_data and isinstance(salary_data, str):
             salary_data = json.loads(salary_data)
 
         employee = serializer.save()
 
-        # 🔥 UPDATE SALARY
-        if salary_data:
+        if salary_data and isinstance(salary_data, dict):
+            from decimal import Decimal
+            import decimal
+            
             salary_obj, created = Salary.objects.get_or_create(employee=employee)
 
             for key, value in salary_data.items():
-                setattr(salary_obj, key, value)
+                if key == 'employee' or key == 'id':
+                    continue
+                    
+                if hasattr(salary_obj, key):
+                    try:
+                        decimal_value = Decimal(str(value)) if value not in ["", None] else Decimal("0")
+                        setattr(salary_obj, key, decimal_value)
+                    except (ValueError, TypeError, decimal.InvalidOperation):
+                        pass
 
             salary_obj.save()
 
@@ -369,10 +395,17 @@ class EmployeeViewSet(ModelViewSet):
     # CURRENT EMPLOYEE PROFILE
     # =====================================================
 
-    @action(detail=False, methods=["get"])
+    @action(detail=False, methods=["get", "patch", "put"])
     def me(self, request):
         employee = request.user.employee_profile
-        serializer = self.get_serializer(employee)
+        
+        if request.method == "GET":
+            serializer = self.get_serializer(employee)
+            return Response(serializer.data)
+        
+        serializer = self.get_serializer(employee, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
         return Response(serializer.data)
 
     # =====================================================
@@ -390,6 +423,65 @@ class EmployeeViewSet(ModelViewSet):
             queryset = queryset.exclude(pk=employee_pk)
 
         return Response({"exists": queryset.exists()})
+
+    @action(detail=True, methods=["post"])
+    def activate(self, request, pk=None):
+        employee = self.get_object()
+        employee.is_active = True
+        employee.save()
+        return Response({"message": "Employee activated successfully"})
+
+    @action(detail=False, methods=["get", "post"])
+    def roles(self, request):
+        from .models import CustomRole
+        
+        if request.method == "GET":
+            designations = Employee.objects.filter(is_active=True).values_list('designation', flat=True).distinct()
+            custom_roles = CustomRole.objects.all().values_list('name', flat=True)
+            all_roles = list(set(list(designations) + list(custom_roles)))
+            all_roles.sort()
+            return Response({"roles": all_roles})
+        
+        elif request.method == "POST":
+            role = request.data.get('role', '').strip()
+            if not role:
+                return Response({"error": "Role name required"}, status=400)
+            
+            CustomRole.objects.get_or_create(name=role)
+            return Response({"message": "Role added successfully"})
+
+    @action(detail=False, methods=["delete"], url_path="roles/(?P<role_name>[^/.]+)")
+    def delete_role(self, request, role_name=None):
+        from .models import CustomRole
+        
+        CustomRole.objects.filter(name=role_name).delete()
+        return Response({"message": "Role deleted successfully"})
+
+    @action(detail=False, methods=["get", "post"])
+    def departments(self, request):
+        from .models import CustomDepartment
+        
+        if request.method == "GET":
+            departments = Employee.objects.filter(is_active=True).values_list('department', flat=True).distinct()
+            custom_departments = CustomDepartment.objects.all().values_list('name', flat=True)
+            all_departments = list(set(list(departments) + list(custom_departments)))
+            all_departments.sort()
+            return Response({"departments": all_departments})
+        
+        elif request.method == "POST":
+            department = request.data.get('department', '').strip()
+            if not department:
+                return Response({"error": "Department name required"}, status=400)
+            
+            CustomDepartment.objects.get_or_create(name=department)
+            return Response({"message": "Department added successfully"})
+
+    @action(detail=False, methods=["delete"], url_path="departments/(?P<department_name>[^/.]+)")
+    def delete_department(self, request, department_name=None):
+        from .models import CustomDepartment
+        
+        CustomDepartment.objects.filter(name=department_name).delete()
+        return Response({"message": "Department deleted successfully"})
 
     # =====================================================
     # 🔥 ENTERPRISE DASHBOARD SUMMARY (PHASE 2)

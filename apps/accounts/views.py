@@ -210,6 +210,137 @@ def change_password(request):
     return Response({"message": "Password changed successfully"})
 
 
+# =========================================================
+# 🔑 CHANGE PASSWORD WITH OLD PASSWORD VERIFICATION
+# =========================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def change_password_with_old(request):
+
+    old_password = request.data.get("old_password")
+    new_password = request.data.get("new_password")
+
+    if not old_password or not new_password:
+        return Response(
+            {"error": "Both old and new passwords are required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    user = request.user
+
+    # Verify old password
+    if not user.check_password(old_password):
+        return Response(
+            {"error": "Old password is incorrect"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Set new password
+    user.set_password(new_password)
+    user.must_change_password = False
+    user.failed_attempts = 0
+    user.is_locked = False
+    user.save()
+
+    return Response({"message": "Password changed successfully"})
+
+
+# =========================================================
+# 📧 FORGOT PASSWORD - SEND TEMPORARY PASSWORD
+# =========================================================
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def forgot_password(request):
+    from django.core.mail import EmailMultiAlternatives
+    from django.contrib.auth.hashers import make_password
+    import random
+    import string
+
+    email = request.data.get("email")
+
+    if not email:
+        return Response(
+            {"error": "Email is required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        user = User.objects.get(email=email)
+    except User.DoesNotExist:
+        return Response(
+            {"error": "No user found with this email"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # Generate temporary password
+    temp_password = ''.join(
+        random.choices(string.ascii_letters + string.digits, k=10)
+    )
+
+    # Update user
+    user.password = make_password(temp_password)
+    user.must_change_password = True
+    user.failed_attempts = 0
+    user.is_locked = False
+    user.save()
+
+    # Send email
+    try:
+        subject = "HRMS - Temporary Password"
+        
+        text_content = f"""
+Hello {user.username},
+
+Your temporary password is: {temp_password}
+
+Please login and change your password immediately.
+
+Login URL: http://localhost:5173/login
+
+Regards,
+HRMS Team
+"""
+
+        html_content = f"""
+<div style="font-family: Arial; padding: 20px;">
+    <h2>Password Reset Request</h2>
+    <p>Hello <strong>{user.username}</strong>,</p>
+    <p>Your temporary password is:</p>
+    <h3 style="background: #f1f5f9; padding: 15px; border-radius: 8px; display: inline-block;">{temp_password}</h3>
+    <p style="color: red;">⚠️ Please login and change your password immediately.</p>
+    <p>
+        <a href="http://localhost:5173/login" 
+           style="background:#2563eb; color:white; padding:12px 24px; 
+           text-decoration:none; border-radius:8px; display:inline-block;">
+            Login to HRMS
+        </a>
+    </p>
+    <p>Regards,<br><strong>HRMS Team</strong></p>
+</div>
+"""
+
+        email_message = EmailMultiAlternatives(
+            subject,
+            text_content,
+            settings.DEFAULT_FROM_EMAIL,
+            [email],
+        )
+        email_message.attach_alternative(html_content, "text/html")
+        email_message.send(fail_silently=False)
+
+        return Response({
+            "message": "Temporary password sent to your email"
+        })
+
+    except Exception as e:
+        return Response(
+            {"error": f"Failed to send email: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
 
 # =========================================================
 # 📊 SUPER ADMIN ANALYTICS

@@ -877,10 +877,10 @@ def all_salaries(request):
             "id": s.id,
             "employee_id": s.employee.id,
             "employee_name": f"{s.employee.first_name} {s.employee.last_name}",
-            "basic": s.basic,
-            "hra": s.hra,
-            "allowances": s.allowances,
-            "deductions": s.deductions,
+            "basic": getattr(s, 'basic', 0) or 0,
+            "hra": getattr(s, 'hra', 0) or 0,
+            "da": getattr(s, 'da', 0) or 0,
+            "gross_salary": getattr(s, 'gross_salary', 0) or 0,
         }
         for s in salaries
     ]
@@ -895,10 +895,12 @@ def update_salary(request, salary_id):
     except Salary.DoesNotExist:
         return Response({"error": "Salary not found"}, status=404)
 
-    salary.basic = Decimal(request.data.get("basic", salary.basic))
-    salary.hra = Decimal(request.data.get("hra", salary.hra))
-    salary.allowances = Decimal(request.data.get("allowances", salary.allowances))
-    salary.deductions = Decimal(request.data.get("deductions", salary.deductions))
+    salary.basic = Decimal(request.data.get("basic", getattr(salary, 'basic', 0)))
+    salary.hra = Decimal(request.data.get("hra", getattr(salary, 'hra', 0)))
+    salary.da = Decimal(request.data.get("da", getattr(salary, 'da', 0)))
+    salary.conveyance = Decimal(request.data.get("conveyance", getattr(salary, 'conveyance', 0)))
+    salary.medical = Decimal(request.data.get("medical", getattr(salary, 'medical', 0)))
+    salary.special_allowance = Decimal(request.data.get("special_allowance", getattr(salary, 'special_allowance', 0)))
     salary.save()
 
     return Response({"message": "Salary updated successfully"})
@@ -913,23 +915,25 @@ def get_salary_by_employee(request, employee_id):
         return Response({"error": "Salary not found"}, status=404)
 
     return Response({
-        "basic": salary.basic,
-        "hra": salary.hra,
-        "allowances": salary.allowances,
-        "deductions": salary.deductions,
+        "basic": getattr(salary, 'basic', 0) or 0,
+        "hra": getattr(salary, 'hra', 0) or 0,
+        "da": getattr(salary, 'da', 0) or 0,
+        "conveyance": getattr(salary, 'conveyance', 0) or 0,
+        "medical": getattr(salary, 'medical', 0) or 0,
+        "special_allowance": getattr(salary, 'special_allowance', 0) or 0,
     })
 
 
 def calculate_epf(basic_after_lop, employee):
-
-    if not employee.pf_applicable:
+    if not getattr(employee, 'pf_applicable', False):
         return Decimal("0.00"), Decimal("0.00")
 
     PF_RATE = Decimal("0.12")
     PF_WAGE_CEILING = Decimal("15000")
 
-    # Apply ceiling only if applicable
-    if employee.pf_wage_ceiling_applicable:
+    # Apply ceiling (default to True if not set)
+    pf_wage_ceiling_applicable = getattr(employee, 'pf_wage_ceiling_applicable', True)
+    if pf_wage_ceiling_applicable:
         pf_wage = min(basic_after_lop, PF_WAGE_CEILING)
     else:
         pf_wage = basic_after_lop
@@ -941,8 +945,7 @@ def calculate_epf(basic_after_lop, employee):
 
 
 def calculate_esi(gross_after_lop, employee):
-
-    if not employee.esi_applicable:
+    if not getattr(employee, 'esi_applicable', False):
         return Decimal("0.00"), Decimal("0.00")
 
     ESI_EMPLOYEE_RATE = Decimal("0.0075")
@@ -1016,6 +1019,7 @@ def generate_payslip(request):
             status=400
         )
 
+    # salary = employee.salary
     salary = get_current_salary(employee)
 
     if not salary:
@@ -1024,14 +1028,14 @@ def generate_payslip(request):
             status=400
         )
 
-    # salary = employee.salary
+    # Calculate gross salary safely
     gross_salary = (
-        (salary.basic or 0) +
-        (salary.da or 0) +
-        (salary.hra or 0) +
-        (salary.conveyance or 0) +
-        (salary.medical or 0) +
-        (salary.special_allowance or 0)
+        (getattr(salary, 'basic', 0) or 0) +
+        (getattr(salary, 'da', 0) or 0) +
+        (getattr(salary, 'hra', 0) or 0) +
+        (getattr(salary, 'conveyance', 0) or 0) +
+        (getattr(salary, 'medical', 0) or 0) +
+        (getattr(salary, 'special_allowance', 0) or 0)
     )
 
     if gross_salary <= 0:
@@ -1051,22 +1055,17 @@ def generate_payslip(request):
         return Response({"error": "Payslip already generated"}, status=400)
 
     # =====================================================
-    # 5️⃣ EARNINGS (A)
+    # 5️⃣ EARNINGS (A) - Recalculate to ensure consistency
     # =====================================================
-    basic = salary.basic
-    da = salary.da
-    hra = salary.hra
-    conveyance = salary.conveyance
-    medical = salary.medical
-    special_allowance = salary.special_allowance
-    gross_salary = (
-    (salary.basic or 0) +
-    (salary.da or 0) +
-    (salary.hra or 0) +
-    (salary.conveyance or 0) +
-    (salary.medical or 0) +
-    (salary.special_allowance or 0)
-)
+    basic = getattr(salary, 'basic', 0) or 0
+    da = getattr(salary, 'da', 0) or 0
+    hra = getattr(salary, 'hra', 0) or 0
+    conveyance = getattr(salary, 'conveyance', 0) or 0
+    medical = getattr(salary, 'medical', 0) or 0
+    special_allowance = getattr(salary, 'special_allowance', 0) or 0
+    
+    # Recalculate gross salary to ensure consistency
+    gross_salary = basic + da + hra + conveyance + medical + special_allowance
 
     # =====================================================
     # 6️⃣ LOP CALCULATION (Service-Based Version)
@@ -1133,7 +1132,7 @@ def generate_payslip(request):
     # =====================================================
     # 1️⃣1️⃣ OTHER DEDUCTIONS
     # =====================================================
-    medical_insurance = salary.medical_insurance or Decimal("0.00")
+    medical_insurance = getattr(salary, 'medical_insurance', 0) or Decimal("0.00")
 
     total_deductions = (
         employee_pf +
@@ -1176,7 +1175,7 @@ def generate_payslip(request):
         medical_insurance=medical_insurance,
 
         net_pay=net_pay,
-        status="DRAFT"
+        status="NOT PAID"
     )
 
     return Response({
@@ -1231,21 +1230,39 @@ def bulk_generate_payslips(request):
     generated = 0
 
     for emp in employees:
-        if not hasattr(emp, "salary"):
+        salary = get_current_salary(emp)
+        if not salary:
             continue
 
-        salary = emp.salary
-        gross = salary.gross_salary()
-        net = gross - salary.fixed_deductions
+        gross = (
+            (getattr(salary, 'basic', 0) or 0) +
+            (getattr(salary, 'da', 0) or 0) +
+            (getattr(salary, 'hra', 0) or 0) +
+            (getattr(salary, 'conveyance', 0) or 0) +
+            (getattr(salary, 'medical', 0) or 0) +
+            (getattr(salary, 'special_allowance', 0) or 0)
+        )
+        
+        deductions = (
+            (getattr(salary, 'employee_pf', 0) or 0) +
+            (getattr(salary, 'professional_tax', 0) or 0) +
+            (getattr(salary, 'employee_esi', 0) or 0) +
+            (getattr(salary, 'tds', 0) or 0) +
+            (getattr(salary, 'medical_insurance', 0) or 0)
+        )
+        
+        net = gross - deductions
 
         Payslip.objects.get_or_create(
             employee=emp,
             month=date(month_date.year, month_date.month, 1),
             defaults={
-                "basic": salary.basic,
-                "hra": salary.hra,
-                "allowances": salary.allowances,
-                "fixed_deductions": salary.deductions,
+                "basic": getattr(salary, 'basic', 0) or 0,
+                "hra": getattr(salary, 'hra', 0) or 0,
+                "da": getattr(salary, 'da', 0) or 0,
+                "conveyance": getattr(salary, 'conveyance', 0) or 0,
+                "medical": getattr(salary, 'medical', 0) or 0,
+                "special_allowance": getattr(salary, 'special_allowance', 0) or 0,
                 "gross_salary": gross,
                 "net_pay": net,
             }
@@ -1605,7 +1622,7 @@ def bulk_approve_payslips(request):
     approved_now = Payslip.objects.filter(
         month__year=year,
         month__month=month,
-        status="DRAFT"
+        status="NOT PAID"
     ).update(status="APPROVED")
 
     # =========================================================
@@ -1820,7 +1837,7 @@ def payroll_dashboard_summary(request):
     )
 
     total = payslips.count()
-    draft = payslips.filter(status="DRAFT").count()
+    draft = payslips.filter(status="Not Paid").count()
     approved = payslips.filter(status="APPROVED").count()
     paid = payslips.filter(status="PAID").count()
 
@@ -1900,12 +1917,12 @@ def payroll_status(request):
 
         if salary:
             gross_salary = (
-                (salary.basic or 0) +
-                (salary.da or 0) +
-                (salary.hra or 0) +
-                (salary.conveyance or 0) +
-                (salary.medical or 0) +
-                (salary.special_allowance or 0)
+                (getattr(salary, 'basic', 0) or 0) +
+                (getattr(salary, 'da', 0) or 0) +
+                (getattr(salary, 'hra', 0) or 0) +
+                (getattr(salary, 'conveyance', 0) or 0) +
+                (getattr(salary, 'medical', 0) or 0) +
+                (getattr(salary, 'special_allowance', 0) or 0)
             )
 
             employer_pf = getattr(salary, "employer_pf", 0) or 0
@@ -1943,11 +1960,11 @@ def payroll_status(request):
             "lop_deduction": payslip.lop_deduction if payslip else 0,
 
             "total_deductions": (
-                payslip.employee_pf +
-                payslip.employee_esi +
-                payslip.professional_tax +
-                payslip.tds_amount +
-                payslip.fixed_deductions
+                (payslip.employee_pf or 0) +
+                (payslip.employee_esi or 0) +
+                (payslip.professional_tax or 0) +
+                (payslip.tds_amount or 0) +
+                (getattr(payslip, 'fixed_deductions', 0) or 0)
             ) if payslip else 0,
 
             "net_pay": payslip.net_pay if payslip else 0,
@@ -1995,8 +2012,7 @@ def reopen_payroll_month(request):
 
 
 def calculate_professional_tax(gross_after_lop, employee):
-
-    if not employee.pt_applicable:
+    if not getattr(employee, 'pt_applicable', False):
         return Decimal("0.00")
 
     # Andhra Pradesh PT Slab (example)
@@ -2440,20 +2456,18 @@ def generate_neft_file(request):
     total_amount = Decimal("0.00")
 
     for slip in payslips:
-
         employee = slip.employee
 
-        if not employee.bank_account_number or not employee.bank_ifsc:
+        if not getattr(employee, 'account_number', '') or not getattr(employee, 'ifsc', ''):
             continue  # Skip if bank details missing
 
         amount = slip.net_pay
-
         total_amount += amount
 
         writer.writerow([
             employee.first_name.upper(),
-            employee.bank_account_number,
-            employee.bank_ifsc,
+            getattr(employee, 'account_number', ''),
+            getattr(employee, 'ifsc', ''),
             f"{amount:.2f}",
             "NEFT",
             f"Salary {month_value}"
@@ -2462,88 +2476,6 @@ def generate_neft_file(request):
     # Optional: summary row
     writer.writerow([])
     writer.writerow(["", "", "TOTAL", f"{total_amount:.2f}"])
-
-    return response
-
-
-@api_view(["POST"])
-@permission_classes([IsHR])
-@transaction.atomic
-def generate_neft_file(request):
-
-    month_value = request.data.get("month")
-    mark_as_paid = request.data.get("mark_as_paid", False)
-
-    if not month_value:
-        return Response({"error": "month required (YYYY-MM)"}, status=400)
-
-    try:
-        month_date = datetime.strptime(month_value, "%Y-%m")
-    except ValueError:
-        return Response({"error": "Invalid month format"}, status=400)
-
-    payslips = Payslip.objects.filter(
-        month__year=month_date.year,
-        month__month=month_date.month,
-        status="APPROVED"
-    ).select_related("employee__company")
-
-    if not payslips.exists():
-        return Response({"error": "No approved payslips found"}, status=400)
-
-    company = payslips.first().employee.company
-
-    batch_reference = f"SALARY_{month_value.replace('-', '')}"
-
-    response = HttpResponse(content_type="text/csv")
-    response["Content-Disposition"] = f'attachment; filename="NEFT_{month_value}.csv"'
-
-    writer = csv.writer(response)
-
-    # Header row
-    writer.writerow([
-        "Batch Ref No",
-        "Company Debit Account",
-        "Beneficiary Name",
-        "Beneficiary Account",
-        "IFSC",
-        "Amount",
-        "Payment Mode",
-        "Remarks"
-    ])
-
-    total_amount = Decimal("0.00")
-
-    for slip in payslips:
-
-        employee = slip.employee
-
-        if not employee.bank_account_number or not employee.bank_ifsc:
-            continue  # Skip employees without bank details
-
-        amount = slip.net_pay
-        total_amount += amount
-
-        writer.writerow([
-            batch_reference,
-            getattr(company, "company_bank_account", ""),
-            employee.first_name.upper(),
-            employee.bank_account_number,
-            employee.bank_ifsc,
-            f"{amount:.2f}",
-            "NEFT",
-            f"Salary {month_value}"
-        ])
-
-        # Optional: mark payslip as paid
-        if mark_as_paid:
-            slip.status = "PAID"
-            slip.paid_on = timezone.now()
-            slip.save()
-
-    # Summary row
-    writer.writerow([])
-    writer.writerow(["", "", "", "", "TOTAL", f"{total_amount:.2f}"])
 
     return response
 
@@ -2576,13 +2508,18 @@ def generate_full_final(request):
     # salary = employee.salary
     salary = get_current_salary(employee)
 
-    # basic = Decimal(salary.basic)
-    # hra = Decimal(salary.hra)
-    # allowances = Decimal(salary.allowances)
-
-    # gross_monthly = basic + hra + allowances
-
-    gross_monthly = salary.gross_salary()
+    # Calculate gross monthly safely
+    if salary:
+        gross_monthly = (
+            (getattr(salary, 'basic', 0) or 0) +
+            (getattr(salary, 'da', 0) or 0) +
+            (getattr(salary, 'hra', 0) or 0) +
+            (getattr(salary, 'conveyance', 0) or 0) +
+            (getattr(salary, 'medical', 0) or 0) +
+            (getattr(salary, 'special_allowance', 0) or 0)
+        )
+    else:
+        gross_monthly = Decimal("0.00")
 
     total_days = monthrange(last_date.year, last_date.month)[1]
     worked_days = last_date.day
@@ -2652,12 +2589,32 @@ def ctc_yearly_breakdown(request):
     # salary = employee.salary
     salary = get_current_salary(employee)
 
-    # ================= MONTHLY =================
-    monthly_gross = salary.gross_salary
-    monthly_deductions = salary.total_deductions
-    monthly_net = salary.net_salary
-    monthly_employer = salary.additional_benefits
-    monthly_ctc = salary.ctc
+    # Calculate salary components safely
+    if salary:
+        monthly_gross = (
+            (getattr(salary, 'basic', 0) or 0) +
+            (getattr(salary, 'da', 0) or 0) +
+            (getattr(salary, 'hra', 0) or 0) +
+            (getattr(salary, 'conveyance', 0) or 0) +
+            (getattr(salary, 'medical', 0) or 0) +
+            (getattr(salary, 'special_allowance', 0) or 0)
+        )
+        monthly_deductions = (
+            (getattr(salary, 'employee_pf', 0) or 0) +
+            (getattr(salary, 'professional_tax', 0) or 0) +
+            (getattr(salary, 'employee_esi', 0) or 0) +
+            (getattr(salary, 'tds', 0) or 0) +
+            (getattr(salary, 'medical_insurance', 0) or 0)
+        )
+        monthly_net = monthly_gross - monthly_deductions
+        monthly_employer = (
+            (getattr(salary, 'employer_pf', 0) or 0) +
+            (getattr(salary, 'employer_esi', 0) or 0) +
+            (getattr(salary, 'gratuity', 0) or 0)
+        )
+        monthly_ctc = monthly_gross + monthly_employer
+    else:
+        monthly_gross = monthly_deductions = monthly_net = monthly_employer = monthly_ctc = 0
 
     # ================= YEARLY =================
     yearly_gross = monthly_gross * Decimal("12")
@@ -2743,6 +2700,55 @@ def my_payroll_summary(request):
     }
 
     return Response(summary)
+
+
+@api_view(["GET"])
+@permission_classes([IsEmployee])
+def my_salary_view(request):
+    """
+    Employee can view ONLY their own salary payment history
+    """
+    employee = request.user.employee_profile
+    current_year = timezone.now().year
+    
+    # Get all payroll records for this employee
+    payslips = Payslip.objects.filter(
+        employee=employee,
+        status__in=["APPROVED", "PAID"]
+    ).order_by("-month")
+    
+    # Calculate YTD summary
+    ytd_payslips = payslips.filter(month__year=current_year)
+    
+    total_salary_ytd = ytd_payslips.aggregate(
+        total=Sum("net_pay")
+    )["total"] or 0
+    
+    # Get last payment
+    last_payment = payslips.first()
+    
+    # Format payment data
+    payments = []
+    for payslip in payslips:
+        payments.append({
+            "id": payslip.id,
+            "month": payslip.month.strftime("%B %Y"),
+            "net_salary": float(payslip.net_pay),
+            "payment_date": payslip.paid_on if payslip.paid_on else None,
+            "status": payslip.status,
+        })
+    
+    # Summary data
+    summary = {
+        "total_salary_ytd": float(total_salary_ytd),
+        "last_payment_amount": float(last_payment.net_pay) if last_payment else 0,
+        "last_payment_date": last_payment.paid_on if last_payment else None,
+    }
+    
+    return Response({
+        "payments": payments,
+        "summary": summary
+    })
 
 
 @api_view(["GET"])
@@ -2878,6 +2884,7 @@ def export_payroll_pdf(request):
 
     # ================= HEADER =================
     elements.append(Paragraph("<b>Genius Minds Making Code HRMS</b>", styles["Title"]))
+    elements.append(Paragraph("<b>Genius Minds Making Code Pvt Ltd</b>", styles["Title"]))
     elements.append(Spacer(1, 0.2 * inch))
 
     if year and month:
@@ -2955,6 +2962,7 @@ def export_payroll_pdf(request):
     elements.append(
         Paragraph(
             "Generated by Genius Minds Making Code HRMS System",
+            "Generated by Genius Minds Making Code Pvt Ltd HRMS System",
             styles["Normal"]
         )
     )
@@ -3055,3 +3063,184 @@ def employee_salary_history(request, employee_id):
         })
 
     return Response(data)
+
+
+@api_view(["POST"])
+@permission_classes([IsHR])
+def export_salary_bank_file(request):
+    month_value = request.data.get("month")
+    year_value = request.data.get("year")
+    company_account = request.data.get("company_account", "1234567890")
+
+    if not month_value or not year_value:
+        return Response({"error": "month and year required"}, status=400)
+
+    try:
+        month = int(month_value)
+        year = int(year_value)
+    except ValueError:
+        return Response({"error": "Invalid month or year"}, status=400)
+
+    payslips = Payslip.objects.filter(
+        month__year=year,
+        month__month=month,
+        status__in=["APPROVED", "PAID"],
+        employee__is_active=True
+    ).select_related("employee")
+
+    if not payslips.exists():
+        return Response({"error": "No approved payslips found"}, status=404)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bank Salary Upload"
+
+    headers = [
+        "Debit Account Number",
+        "Transaction Amount",
+        "Transaction Currency",
+        "Beneficiary Name",
+        "Beneficiary Account Number",
+        "Beneficiary IFSC Code",
+        "Transaction Date",
+        "Payment Mode",
+        "Customer Reference Number",
+        "Beneficiary Nickname/Code"
+    ]
+    ws.append(headers)
+
+    transaction_date = datetime(year, month, 28).strftime("%d-%m-%Y")
+    reference = f"Salary_{datetime(year, month, 1).strftime('%b_%Y')}"
+
+    for slip in payslips:
+        emp = slip.employee
+        
+        if not emp.account_number or not emp.ifsc:
+            continue
+
+        ws.append([
+            company_account,
+            float(slip.net_pay),
+            "INR",
+            f"{emp.first_name} {emp.last_name}".upper(),
+            emp.account_number,
+            emp.ifsc,
+            transaction_date,
+            "N",
+            reference,
+            emp.employee_id
+        ])
+
+    response = HttpResponse(
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    response["Content-Disposition"] = f'attachment; filename="Bank_Salary_Upload_{reference}.xlsx"'
+
+    wb.save(response)
+    return response
+
+
+
+@api_view(["GET"])
+@permission_classes([IsHR])
+def export_salary_bank_file(request):
+    """
+    Generate Excel file for bank salary transfer upload
+    Query params: month, year, company_account (optional)
+    """
+    month_value = request.GET.get("month")
+    year_value = request.GET.get("year")
+    company_account = request.GET.get("company_account", "1234567890")
+
+    if not month_value or not year_value:
+        return Response({"error": "month and year required"}, status=400)
+
+    try:
+        month = int(month_value)
+        year = int(year_value)
+    except ValueError:
+        return Response({"error": "Invalid month or year"}, status=400)
+
+    payslips = Payslip.objects.filter(
+        month__year=year,
+        month__month=month,
+        status__in=["APPROVED", "PAID"],
+        employee__is_active=True
+    ).select_related("employee")
+
+    if not payslips.exists():
+        return Response({"error": "No approved payslips found"}, status=404)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Salary Transfer"
+
+    from openpyxl.styles import Font, Alignment, PatternFill
+
+    headers = [
+        "Debit Account Number",
+        "Transaction Amount",
+        "Transaction Currency",
+        "Beneficiary Name",
+        "Beneficiary Account Number",
+        "Beneficiary IFSC Code",
+        "Transaction Date",
+        "Payment Mode",
+        "Customer Reference Number",
+        "Beneficiary Nickname/Code"
+    ]
+
+    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.value = header
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+    transaction_date = datetime(year, month, 28).strftime("%d-%m-%Y")
+    month_name = datetime(year, month, 1).strftime('%b')
+    reference = f"Salary{month_name}{year}"
+
+    row_num = 2
+
+    for slip in payslips:
+        emp = slip.employee
+        
+        if not emp.account_number or not emp.ifsc:
+            continue
+
+        ws.cell(row=row_num, column=1).value = company_account
+        ws.cell(row=row_num, column=2).value = float(slip.net_pay)
+        ws.cell(row=row_num, column=3).value = "INR"
+        ws.cell(row=row_num, column=4).value = f"{emp.first_name} {emp.last_name}".upper()
+        ws.cell(row=row_num, column=5).value = emp.account_number
+        ws.cell(row=row_num, column=6).value = emp.ifsc
+        ws.cell(row=row_num, column=7).value = transaction_date
+        ws.cell(row=row_num, column=8).value = "NEFT"
+        ws.cell(row=row_num, column=9).value = reference
+        ws.cell(row=row_num, column=10).value = f"{emp.employee_id} - {emp.first_name} {emp.last_name}"
+        row_num += 1
+
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(cell.value)
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 50)
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+    response = HttpResponse(
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    filename = f"Bank_Salary_Transfer_{month_name}_{year}.xlsx"
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+    wb.save(response)
+    return response
