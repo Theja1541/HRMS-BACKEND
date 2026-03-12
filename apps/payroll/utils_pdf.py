@@ -68,7 +68,7 @@ def generate_payslip_pdf(payslip):
     header_style = styles["Heading1"]
     header_style.alignment = 1  # center
 
-    elements.append(Paragraph("GMMC HRMS", header_style))
+    elements.append(Paragraph("Genius Minds Making Code HRMS", header_style))
     elements.append(Spacer(1, 0.2 * inch))
 
     elements.append(Paragraph("Salary Payslip", styles["Heading2"]))

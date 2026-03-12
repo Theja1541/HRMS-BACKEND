@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'apps.attendance.apps.AttendanceConfig',
     'apps.leaves.apps.LeavesConfig',
     'apps.payroll.apps.PayrollConfig',
+    'apps.daybook.apps.DaybookConfig',
     'apps.audit',
     'rest_framework_simplejwt.token_blacklist',
     "django_celery_beat",
