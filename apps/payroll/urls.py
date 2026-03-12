@@ -60,6 +60,7 @@ urlpatterns = [
     path("full-final/generate/", views.generate_full_final),
     path("salary/ctc-yearly/", views.ctc_yearly_breakdown),
     path("my-summary/", views.my_payroll_summary),
+    path("my-salary/", views.my_salary_view),
 
     # ============================================
     # PAYROLL SUMMARY

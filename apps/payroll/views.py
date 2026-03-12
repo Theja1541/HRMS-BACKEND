@@ -2703,6 +2703,55 @@ def my_payroll_summary(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsEmployee])
+def my_salary_view(request):
+    """
+    Employee can view ONLY their own salary payment history
+    """
+    employee = request.user.employee_profile
+    current_year = timezone.now().year
+    
+    # Get all payroll records for this employee
+    payslips = Payslip.objects.filter(
+        employee=employee,
+        status__in=["APPROVED", "PAID"]
+    ).order_by("-month")
+    
+    # Calculate YTD summary
+    ytd_payslips = payslips.filter(month__year=current_year)
+    
+    total_salary_ytd = ytd_payslips.aggregate(
+        total=Sum("net_pay")
+    )["total"] or 0
+    
+    # Get last payment
+    last_payment = payslips.first()
+    
+    # Format payment data
+    payments = []
+    for payslip in payslips:
+        payments.append({
+            "id": payslip.id,
+            "month": payslip.month.strftime("%B %Y"),
+            "net_salary": float(payslip.net_pay),
+            "payment_date": payslip.paid_on if payslip.paid_on else None,
+            "status": payslip.status,
+        })
+    
+    # Summary data
+    summary = {
+        "total_salary_ytd": float(total_salary_ytd),
+        "last_payment_amount": float(last_payment.net_pay) if last_payment else 0,
+        "last_payment_date": last_payment.paid_on if last_payment else None,
+    }
+    
+    return Response({
+        "payments": payments,
+        "summary": summary
+    })
+
+
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def payroll_summary(request):
 
@@ -3084,6 +3133,112 @@ def export_salary_bank_file(request):
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     response["Content-Disposition"] = f'attachment; filename="Bank_Salary_Upload_{reference}.xlsx"'
+
+    wb.save(response)
+    return response
+
+
+
+@api_view(["GET"])
+@permission_classes([IsHR])
+def export_salary_bank_file(request):
+    """
+    Generate Excel file for bank salary transfer upload
+    Query params: month, year, company_account (optional)
+    """
+    month_value = request.GET.get("month")
+    year_value = request.GET.get("year")
+    company_account = request.GET.get("company_account", "1234567890")
+
+    if not month_value or not year_value:
+        return Response({"error": "month and year required"}, status=400)
+
+    try:
+        month = int(month_value)
+        year = int(year_value)
+    except ValueError:
+        return Response({"error": "Invalid month or year"}, status=400)
+
+    payslips = Payslip.objects.filter(
+        month__year=year,
+        month__month=month,
+        status__in=["APPROVED", "PAID"],
+        employee__is_active=True
+    ).select_related("employee")
+
+    if not payslips.exists():
+        return Response({"error": "No approved payslips found"}, status=404)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Salary Transfer"
+
+    from openpyxl.styles import Font, Alignment, PatternFill
+
+    headers = [
+        "Debit Account Number",
+        "Transaction Amount",
+        "Transaction Currency",
+        "Beneficiary Name",
+        "Beneficiary Account Number",
+        "Beneficiary IFSC Code",
+        "Transaction Date",
+        "Payment Mode",
+        "Customer Reference Number",
+        "Beneficiary Nickname/Code"
+    ]
+
+    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.value = header
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+    transaction_date = datetime(year, month, 28).strftime("%d-%m-%Y")
+    month_name = datetime(year, month, 1).strftime('%b')
+    reference = f"Salary{month_name}{year}"
+
+    row_num = 2
+
+    for slip in payslips:
+        emp = slip.employee
+        
+        if not emp.account_number or not emp.ifsc:
+            continue
+
+        ws.cell(row=row_num, column=1).value = company_account
+        ws.cell(row=row_num, column=2).value = float(slip.net_pay)
+        ws.cell(row=row_num, column=3).value = "INR"
+        ws.cell(row=row_num, column=4).value = f"{emp.first_name} {emp.last_name}".upper()
+        ws.cell(row=row_num, column=5).value = emp.account_number
+        ws.cell(row=row_num, column=6).value = emp.ifsc
+        ws.cell(row=row_num, column=7).value = transaction_date
+        ws.cell(row=row_num, column=8).value = "NEFT"
+        ws.cell(row=row_num, column=9).value = reference
+        ws.cell(row=row_num, column=10).value = f"{emp.employee_id} - {emp.first_name} {emp.last_name}"
+        row_num += 1
+
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(cell.value)
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 50)
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+    response = HttpResponse(
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    filename = f"Bank_Salary_Transfer_{month_name}_{year}.xlsx"
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
 
     wb.save(response)
     return response
