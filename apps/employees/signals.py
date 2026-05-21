@@ -1,15 +1,27 @@
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from .models import Employee
 from apps.payroll.models import Salary
+from .models import Employee
 
 @receiver(post_save, sender=Employee)
 def create_salary_for_employee(sender, instance, created, **kwargs):
     if created:
-        Salary.objects.create(
+        Salary.objects.get_or_create(
             employee=instance,
-            basic=instance.basic_salary,
-            hra=0,
-            allowances=instance.allowances,
-            deductions=instance.deductions,
+            defaults={
+                "basic": 0,
+                "da": 0,
+                "hra": 0,
+                "conveyance": 0,
+                "medical": 0,
+                "special_allowance": 0,
+                "employee_pf": 0,
+                "professional_tax": 0,
+                "employee_esi": 0,
+                "tds": 0,
+                "medical_insurance": 0,
+                "employer_pf": 0,
+                "employer_esi": 0,
+                "gratuity": 0,
+            },
         )

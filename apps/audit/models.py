@@ -10,8 +10,16 @@ class AuditLog(models.Model):
         ("LOGIN", "Login"),
         ("LOGOUT", "Logout"),
         ("GENERATE", "Generate"),
+        ("PASSWORD_RESET", "Password reset"),
     )
 
+    company = models.ForeignKey(
+        "accounts.Company",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="audit_logs",
+    )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

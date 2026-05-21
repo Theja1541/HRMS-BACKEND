@@ -12,11 +12,10 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
-
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
 
 # Quick-start development settings - unsuitable for production
@@ -44,7 +43,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     "django_filters",
-    'apps.accounts.apps.AccountsConfig',
+    "apps.billing.apps.BillingConfig",
+    "apps.accounts.apps.AccountsConfig",
     'apps.employees.apps.EmployeesConfig',
     'apps.attendance.apps.AttendanceConfig',
     'apps.leaves.apps.LeavesConfig',
@@ -55,6 +55,8 @@ INSTALLED_APPS = [
     # "django_celery_beat",
     # "channels",
     'apps.notifications.apps.NotificationsConfig',
+    "apps.support.apps.SupportConfig",
+    "apps.superadmin.apps.SuperadminConfig",
 ]
 
 MIDDLEWARE = [
@@ -64,6 +66,9 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'apps.accounts.middleware.TenantMiddleware',
+    'apps.accounts.middleware.SubscriptionLockoutMiddleware',
+    'apps.superadmin.middleware.ModuleFeatureFlagMiddleware',
     # 'django_ratelimit.middleware.RatelimitMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -162,7 +167,7 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
-        "rest_framework.permissions.IsAuthenticated",
+        # "rest_framework.permissions.IsAuthenticated",
     ),
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 10,
@@ -194,20 +199,28 @@ CACHES = {
 RATELIMIT_USE_CACHE = "default"
 
 # EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-DEFAULT_FROM_EMAIL = 'hr@gmmc.com'
-
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = "smtp.gmail.com"
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND",
+    "django.core.mail.backends.smtp.EmailBackend",
+)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True") == "True"
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "30"))
 
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
-DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+DEFAULT_FROM_EMAIL = (
+    os.getenv("DEFAULT_FROM_EMAIL")
+    or EMAIL_HOST_USER
+    or "hr@gmmc.com"
+)
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
+TEMP_PASSWORD_EXPIRY_HOURS = int(os.getenv("TEMP_PASSWORD_EXPIRY_HOURS", "24"))
 
 
-MEDIA_URL = "/media/"
-MEDIA_ROOT = os.path.join(BASE_DIR, "media")
+MEDIA_URL = os.getenv("MEDIA_URL", "/media/")
+MEDIA_ROOT = os.getenv("MEDIA_ROOT", os.path.join(BASE_DIR, "media"))
 
 
 CELERY_BROKER_URL = "redis://127.0.0.1:6379/0"
@@ -240,5 +253,4 @@ CHANNEL_LAYERS = {
         },
     },
 }
-
 

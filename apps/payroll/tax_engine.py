@@ -5,28 +5,28 @@ def calculate_new_regime_tax(annual_income):
     tax = Decimal("0")
 
     slabs = [
-        (300000, 0),
-        (600000, 0.05),
-        (900000, 0.10),
-        (1200000, 0.15),
-        (1500000, 0.20),
+        (Decimal("300000"), Decimal("0.00")),
+        (Decimal("600000"), Decimal("0.05")),
+        (Decimal("900000"), Decimal("0.10")),
+        (Decimal("1200000"), Decimal("0.15")),
+        (Decimal("1500000"), Decimal("0.20")),
     ]
 
-    previous_limit = 0
+    previous_limit = Decimal("0")
 
     for limit, rate in slabs:
         if annual_income > limit:
             taxable = limit - previous_limit
-            tax += Decimal(taxable) * Decimal(rate)
+            tax += taxable * rate
             previous_limit = limit
         else:
             taxable = annual_income - previous_limit
-            tax += Decimal(taxable) * Decimal(rate)
+            tax += taxable * rate
             return tax
 
     # Above 15L
-    if annual_income > 1500000:
-        tax += Decimal(annual_income - 1500000) * Decimal("0.30")
+    if annual_income > Decimal("1500000"):
+        tax += (annual_income - Decimal("1500000")) * Decimal("0.30")
 
     return tax
 
@@ -36,30 +36,31 @@ def calculate_old_regime_tax(annual_income):
     tax = Decimal("0")
 
     slabs = [
-        (250000, 0),
-        (500000, 0.05),
-        (1000000, 0.20),
+        (Decimal("250000"), Decimal("0.00")),
+        (Decimal("500000"), Decimal("0.05")),
+        (Decimal("1000000"), Decimal("0.20")),
     ]
 
-    previous_limit = 0
+    previous_limit = Decimal("0")
 
     for limit, rate in slabs:
         if annual_income > limit:
             taxable = limit - previous_limit
-            tax += Decimal(taxable) * Decimal(rate)
+            tax += taxable * rate
             previous_limit = limit
         else:
             taxable = annual_income - previous_limit
-            tax += Decimal(taxable) * Decimal(rate)
+            tax += taxable * rate
             return tax
 
-    if annual_income > 1000000:
-        tax += Decimal(annual_income - 1000000) * Decimal("0.30")
+    if annual_income > Decimal("1000000"):
+        tax += (annual_income - Decimal("1000000")) * Decimal("0.30")
 
     return tax
 
 
 def calculate_monthly_tds(employee, annual_gross):
+    annual_gross = Decimal(str(annual_gross))
 
     # Standard deduction
     taxable_income = annual_gross - Decimal("50000")

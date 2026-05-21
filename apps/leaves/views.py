@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from datetime import timedelta
 from datetime import datetime
 from django.db.models import Q
+from apps.accounts.tenant_utils import get_current_company
 from apps.payroll.utils import is_payroll_closed, is_super_admin
 from .utils import sync_leave_to_attendance
 from apps.attendance.models import Attendance
@@ -35,8 +36,11 @@ def apply_leave(request):
     if not all([leave_type_id, start_date, end_date, reason]):
         return Response({"error": "All fields required"}, status=400)
 
+    leave_type_qs = LeaveType.objects.filter(id=leave_type_id)
+    if getattr(employee, "company_id", None):
+        leave_type_qs = leave_type_qs.filter(company_id=employee.company_id)
     try:
-        leave_type = LeaveType.objects.get(id=leave_type_id)
+        leave_type = leave_type_qs.get()
     except LeaveType.DoesNotExist:
         return Response({"error": "Invalid leave type"}, status=404)
 
@@ -105,14 +109,17 @@ def apply_leave(request):
                 status=400
             )
 
-    leave = LeaveRequest.objects.create(
-        employee=employee,
-        leave_type=leave_type,
-        start_date=start_date,
-        end_date=end_date,
-        reason=reason,
-        is_half_day=is_half_day
-    )
+    leave_kw = {
+        "employee": employee,
+        "leave_type": leave_type,
+        "start_date": start_date,
+        "end_date": end_date,
+        "reason": reason,
+        "is_half_day": is_half_day,
+    }
+    if getattr(employee, "company_id", None):
+        leave_kw["company_id"] = employee.company_id
+    leave = LeaveRequest.objects.create(**leave_kw)
 
     LeaveApprovalLog.objects.create(
         leave_request=leave,
@@ -127,12 +134,12 @@ def apply_leave(request):
 @transaction.atomic
 def approve_leave(request, leave_id):
 
+    company = get_current_company(request)
+    qs = LeaveRequest.objects.select_for_update()
+    if company is not None:
+        qs = qs.filter(company=company)
     try:
-        leave = (
-            LeaveRequest.objects
-            .select_for_update()   # 🔒 row lock
-            .get(id=leave_id)
-        )
+        leave = qs.get(id=leave_id)
     except LeaveRequest.DoesNotExist:
         return Response({"error": "Leave not found"}, status=404)
 
@@ -227,8 +234,10 @@ def my_leave_balance(request):
     employee = request.user.employee_profile
     year = timezone.now().year
 
-    # Get all active leave types
+    # Get all active leave types (tenant-scoped)
     leave_types = LeaveType.objects.filter(is_active=True)
+    if getattr(employee, "company_id", None):
+        leave_types = leave_types.filter(company_id=employee.company_id)
 
     data = []
     for lt in leave_types:
@@ -261,13 +270,16 @@ def my_leave_balance(request):
 @api_view(["GET"])
 @permission_classes([IsHR])
 def all_leave_requests(request):
-    status_filter = request.GET.get('status', None)
-    
-    leaves = LeaveRequest.objects.all().select_related('employee', 'leave_type')
-    
+    company = get_current_company(request)
+    status_filter = request.GET.get("status", None)
+
+    leaves = LeaveRequest.objects.all().select_related("employee", "leave_type")
+    if company is not None:
+        leaves = leaves.filter(company=company)
+
     if status_filter:
         leaves = leaves.filter(status=status_filter.upper())
-    
+
     leaves = leaves.order_by("-applied_on")
     
     # Debug logging
@@ -282,7 +294,10 @@ def all_leave_requests(request):
 @api_view(["GET"])
 @permission_classes([IsEmployee | IsHR])
 def leave_types(request):
+    company = get_current_company(request)
     types = LeaveType.objects.filter(is_active=True)
+    if company is not None:
+        types = types.filter(company=company)
 
     data = [
     {
@@ -310,8 +325,11 @@ def manage_leave_types(request):
     GET: List all leave types (including inactive)
     POST: Create new leave type
     """
+    company = get_current_company(request)
     if request.method == "GET":
         types = LeaveType.objects.all().order_by("-is_active", "name")
+        if company is not None:
+            types = types.filter(company=company)
         data = [
             {
                 "id": t.id,
@@ -334,6 +352,7 @@ def manage_leave_types(request):
     elif request.method == "POST":
         try:
             leave_type = LeaveType.objects.create(
+                company=company,
                 name=request.data.get("name"),
                 annual_quota=request.data.get("annual_quota", 0),
                 is_paid=request.data.get("is_paid", True),
@@ -360,8 +379,12 @@ def update_leave_type(request, leave_type_id):
     PUT: Update leave type
     DELETE: Deactivate leave type
     """
+    company = get_current_company(request)
+    qs = LeaveType.objects.filter(id=leave_type_id)
+    if company is not None:
+        qs = qs.filter(company=company)
     try:
-        leave_type = LeaveType.objects.get(id=leave_type_id)
+        leave_type = qs.get()
     except LeaveType.DoesNotExist:
         return Response({"error": "Leave type not found"}, status=404)
     

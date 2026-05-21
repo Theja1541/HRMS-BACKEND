@@ -1,29 +1,225 @@
+import logging
+import os
+import uuid
+from datetime import timedelta
+
+from PIL import Image
+from django.contrib.auth.password_validation import validate_password
 from django.shortcuts import get_object_or_404
-from django.db.models import Count
-from django.conf import settings
-from rest_framework.decorators import api_view, permission_classes
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
+from django.db.models import Count, Sum
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes, parser_classes
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import User
+from rest_framework_simplejwt.exceptions import TokenError
+from .models import User, Company
 from .serializers import (
     LoginSerializer,
     UserSerializer,
     CreateUserSerializer,
-    UpdateUserRoleSerializer
+    UpdateUserRoleSerializer,
+    CompanySerializer,
 )
 from .permissions import (
     IsAdmin,
+    IsCompanyAdminOrHR,
     IsHR,
     IsEmployee,
-    IsSuperAdmin
+    IsSuperAdmin,
+    normalize_role,
 )
 from apps.employees.models import Employee
 # from apps.leaves.models import Leave
 from apps.leaves.models import LeaveRequest
 from apps.payroll.models import Payslip
 from apps.attendance.models import Attendance
+from .models import TemporaryPasswordRecord
+from apps.audit.utils import log_action
+from .services.temporary_passwords import (
+    TemporaryPasswordEmailError,
+    consume_temporary_password,
+    invalidate_temporary_password,
+    issue_and_send_temporary_password,
+)
+from apps.superadmin.services import (
+    issue_token_pair_for_user,
+    is_password_expired,
+    validate_password_against_settings,
+    get_int_setting,
+)
+
+
+logger = logging.getLogger(__name__)
+
+COMPANY_SCOPED_ROLES = {"ADMIN", "HR", "EMPLOYEE"}
+AUTO_PASSWORD_EMAIL_ROLES = {"ADMIN", "HR"}
+
+MAX_COMPANY_LOGO_BYTES = 2 * 1024 * 1024
+ALLOWED_LOGO_CONTENT_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/svg+xml"})
+ALLOWED_LOGO_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".svg"})
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def custom_token_refresh(request):
+    refresh_token = request.data.get("refresh")
+    if not refresh_token:
+        return Response(
+            {"detail": "Refresh token is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        refresh = RefreshToken(refresh_token)
+        access = refresh.access_token
+        access.set_exp(lifetime=timedelta(minutes=get_int_setting(
+            "session_timeout_minutes", 60, minimum=5
+        )))
+    except TokenError:
+        return Response(
+            {"detail": "Token is invalid or expired."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    return Response({"access": str(access)})
+
+
+def _company_logo_validation_error(uploaded):
+    if uploaded.size > MAX_COMPANY_LOGO_BYTES:
+        return "File too large. Maximum size is 2MB."
+    ext = os.path.splitext(uploaded.name or "")[1].lower()
+    if ext not in ALLOWED_LOGO_EXTENSIONS:
+        return "Unsupported format. Use PNG, JPG, JPEG, or WebP."
+    ct = (uploaded.content_type or "").lower()
+    if ct == "image/jpg":
+        ct = "image/jpeg"
+    if ct not in ALLOWED_LOGO_CONTENT_TYPES:
+        return "Unsupported image type. Use PNG, JPG, JPEG, or WebP."
+    if ext == ".svg" or ct == "image/svg+xml":
+        uploaded.seek(0)
+        return None
+    try:
+        uploaded.seek(0)
+        with Image.open(uploaded) as img:
+            img.verify()
+    except Exception:
+        return "Invalid or corrupted image file."
+    uploaded.seek(0)
+    return None
+
+
+def _can_read_company_branding(request, company):
+    """Any authenticated member of the company may read branding (e.g. sidebar logo)."""
+    if not request.user or not request.user.is_authenticated:
+        return False
+    if not company:
+        return False
+    role = _normalize_role(getattr(request.user, "role", ""))
+    if role == "SUPER_ADMIN":
+        return True
+    return getattr(request.user, "company_id", None) == getattr(company, "id", None)
+
+
+def _can_manage_company_branding(request, company):
+    if not request.user or not request.user.is_authenticated:
+        return False
+    role = _normalize_role(getattr(request.user, "role", ""))
+    if role == "SUPER_ADMIN":
+        return True
+    if role not in {"ADMIN", "HR"}:
+        return False
+    return getattr(request.user, "company_id", None) == getattr(company, "id", None)
+
+
+def _normalize_role(value):
+    return normalize_role(value)
+
+
+def _ensure_super_admin_for_logo(request):
+    if not request.user or not request.user.is_authenticated:
+        return Response(
+            {"detail": "Authentication credentials were not provided or are invalid."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+    if _normalize_role(getattr(request.user, "role", "")) != "SUPER_ADMIN":
+        return Response(
+            {"detail": "Only Super Admin users can upload or remove company logos."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    return None
+
+
+def _get_request_company(request):
+    return getattr(request, "company", None) or getattr(request.user, "company", None)
+
+
+def _build_auth_user_payload(user, request=None):
+    employee_profile_id = None
+    if user.role == "EMPLOYEE":
+        try:
+            employee_profile_id = user.employee_profile.id
+        except Employee.DoesNotExist:
+            employee_profile_id = None
+
+    company_data = None
+    if getattr(user, "company_id", None):
+        company = user.company
+        company_data = {
+            "id": user.company_id,
+            "name": company.name if company else None,
+            "company_code": company.company_code if company else None,
+            "domain": company.domain if company else None,
+            "billing_action_stopped": company.billing_action_stopped if company else False,
+            "subscription_period_end": company.subscription_period_end.isoformat() if company and company.subscription_period_end else None,
+        }
+        if company is not None and request is not None:
+            logo_url = CompanySerializer(company, context={"request": request}).data.get(
+                "logo_url"
+            )
+            if logo_url:
+                company_data["logo_url"] = logo_url
+                company_data["logoUrl"] = logo_url
+
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "company_id": user.company_id,
+        "employee_profile_id": employee_profile_id,
+        "company": company_data,
+    }
+
+
+def _set_new_password(user, new_password):
+    password_error = validate_password_against_settings(new_password)
+    if password_error:
+        raise DjangoValidationError(password_error)
+
+    validate_password(new_password, user=user)
+
+    user.set_password(new_password)
+    user.password_changed_at = timezone.now()
+    user.must_change_password = False
+    user.failed_attempts = 0
+    user.is_locked = False
+    user.locked_at = None
+    user.save(
+        update_fields=[
+            "password",
+            "password_changed_at",
+            "must_change_password",
+            "failed_attempts",
+            "is_locked",
+            "locked_at",
+        ]
+    )
+    invalidate_temporary_password(user)
 
 # =========================================================
 # 🔐 LOGIN (JWT)
@@ -36,46 +232,65 @@ def login_view(request):
     serializer = LoginSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
-    user = serializer.validated_data['user']
+    user = serializer.validated_data["user"]
+    temporary_password_record = serializer.validated_data.get("temporary_password_record")
 
-    refresh = RefreshToken.for_user(user)
+    # ─── Check MFA requirement (lazy import to avoid circular) ───
+    mfa_required = False
+    try:
+        from apps.superadmin.views import _is_mfa_required
+        # MFA applies to non-Super-Admin users only
+        if user.role != "SUPER_ADMIN":
+            mfa_required = _is_mfa_required()
+    except Exception:
+        mfa_required = False
 
-    employee_profile_id = None
-    if user.role == "EMPLOYEE":
-        try:
-            employee_profile_id = user.employee_profile.id
-        except:
-            employee_profile_id = None
+    if mfa_required:
+        # Don't issue tokens yet — tell frontend to show OTP screen
+        log_action(
+            request, "LOGIN_MFA_PENDING", "User",
+            object_id=user.id,
+            description=f"MFA OTP required for login: {user.email}",
+            company=getattr(user, "company", None),
+            user_override=user,
+        )
+        return Response({
+            "mfa_required": True,
+            "user_id": user.id,
+            "email": user.email,
+        }, status=status.HTTP_200_OK)
+
+    # ─── Normal (no-MFA) login flow ──────────────────────────────
+    log_action(
+        request, "LOGIN", "User",
+        object_id=user.id,
+        description=f"User login: {user.email}",
+        company=getattr(user, "company", None),
+        user_override=user,
+    )
+    access_token, refresh_token = issue_token_pair_for_user(user)
+    if temporary_password_record:
+        consume_temporary_password(temporary_password_record)
+
+    user_payload = _build_auth_user_payload(user, request)
 
     # 🔒 FORCE PASSWORD CHANGE
-    if getattr(user, "must_change_password", False):
+    if getattr(user, "must_change_password", False) or is_password_expired(user):
         return Response({
             "force_password_change": True,
-            "access": str(refresh.access_token),
-            "refresh": str(refresh),
-            "user": {
-                "id": user.id,
-                "username": user.username,
-                "email": user.email,
-                "role": user.role,
-                "employee_profile_id": employee_profile_id
-            }
+            "access": access_token,
+            "refresh": refresh_token,
+            "user": user_payload,
         }, status=status.HTTP_200_OK)
 
     # ✅ NORMAL LOGIN
     return Response({
-        "access": str(refresh.access_token),
-        "refresh": str(refresh),
+        "access": access_token,
+        "refresh": refresh_token,
         "force_password_change": False,
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "role": user.role,
-            "employee_profile_id": employee_profile_id
-        }
+        "user": user_payload,
     }, status=status.HTTP_200_OK)
-                    
+
 # =========================================================
 # 👤 CURRENT USER PROFILE
 # =========================================================
@@ -92,16 +307,22 @@ def employee_profile(request):
 # =========================================================
 
 @api_view(['GET'])
-@permission_classes([IsSuperAdmin])
+# @permission_classes([IsSuperAdmin])
 def superadmin_user_list(request):
-    users = User.objects.all().order_by("-id")
+    # SuperAdmin can see all companies' users
+    users = User.objects.select_related("company").all().order_by("-id")
     serializer = UserSerializer(users, many=True)
     return Response(serializer.data)
+
 
 @api_view(['GET'])
 @permission_classes([IsAdmin])
 def admin_user_list(request):
-    users = User.objects.all().order_by("-id")
+    # Tenant isolation: only users of the same company
+    company = getattr(request, "company", None) or getattr(request.user, "company", None)
+    if not company:
+        return Response({"detail": "User has no company."}, status=status.HTTP_403_FORBIDDEN)
+    users = User.objects.filter(company=company).select_related("company").order_by("-id")
     serializer = UserSerializer(users, many=True)
     return Response(serializer.data)
 
@@ -109,9 +330,97 @@ def admin_user_list(request):
 @api_view(['GET'])
 @permission_classes([IsHR])
 def hr_user_list(request):
-    users = User.objects.all().order_by("-id")
+    # Tenant isolation: only users of the same company
+    company = getattr(request, "company", None) or getattr(request.user, "company", None)
+    if not company:
+        return Response({"detail": "User has no company."}, status=status.HTTP_403_FORBIDDEN)
+    users = User.objects.filter(company=company).select_related("company").order_by("-id")
     serializer = UserSerializer(users, many=True)
     return Response(serializer.data)
+
+
+@api_view(["GET"])
+@permission_classes([IsCompanyAdminOrHR])
+def company_user_list(request):
+    """
+    Company-scoped user list for Admin/HR.
+    Returns only Admin/HR users for the current company.
+    """
+    company = _get_request_company(request)
+    if not company:
+        return Response({"detail": "User has no company."}, status=status.HTTP_403_FORBIDDEN)
+
+    users = (
+        User.objects.filter(company=company, role__in=["ADMIN", "HR"])
+        .select_related("company")
+        .order_by("-id")
+    )
+    serializer = UserSerializer(users, many=True)
+    return Response(serializer.data)
+
+
+@api_view(["POST"])
+@permission_classes([IsCompanyAdminOrHR])
+def company_user_create(request):
+    """
+    Admin/HR can create HR users inside their own company.
+    A temporary password is generated and sent by email.
+    """
+    company = _get_request_company(request)
+    if not company:
+        return Response({"detail": "User has no company."}, status=status.HTTP_403_FORBIDDEN)
+
+    requested_role = _normalize_role(request.data.get("role") or "HR")
+    if requested_role != "HR":
+        return Response(
+            {"role": ["Only HR users can be created from the company portal."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    data = request.data.copy()
+    data["role"] = "HR"
+    if not data.get("username"):
+        data["username"] = str(data.get("email") or "").strip().lower()
+
+    serializer = CreateUserSerializer(data=data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        with transaction.atomic():
+            new_user = serializer.save(company=company)
+            issue_and_send_temporary_password(
+                user=new_user,
+                purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
+                issued_by=request.user if request.user.is_authenticated else None,
+                recipient_name=new_user.get_full_name() or new_user.email,
+            )
+            log_action(
+                request, "CREATE", "User",
+                object_id=new_user.id,
+                description=f"Company user created: {new_user.email} (HR)",
+                company=company,
+            )
+    except TemporaryPasswordEmailError as exc:
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception:
+        logger.exception("Failed to create company HR user")
+        return Response(
+            {"error": "Failed to create HR user. Please try again."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    return Response(
+        {
+            "message": "HR user created successfully. Temporary password sent to email.",
+            "temporary_password_email_sent": True,
+            "user_id": new_user.id,
+        },
+        status=status.HTTP_201_CREATED,
+    )
 
 
 # =========================================================
@@ -121,15 +430,82 @@ def hr_user_list(request):
 @api_view(['POST'])
 @permission_classes([IsSuperAdmin])
 def create_user(request):
-    serializer = CreateUserSerializer(data=request.data)
+    """Super Admin can create platform users or tenant-scoped users."""
+    data = request.data.copy()
+    role = _normalize_role(data.get("role"))
 
-    if serializer.is_valid():
-        serializer.save()
+    company_id = data.get("company_id")
+    company = None
+    if role not in {choice[0] for choice in User.ROLE_CHOICES}:
         return Response(
-            {"message": "User created successfully"},
-            status=status.HTTP_201_CREATED
+            {"role": ["Invalid role selected."]},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
+    if company_id is not None and company_id != "":
+        try:
+            company = Company.objects.get(id=int(company_id), is_active=True)
+        except (Company.DoesNotExist, ValueError, TypeError):
+            return Response(
+                {"company_id": ["Invalid company ID."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    if role == "SUPER_ADMIN":
+        if company_id not in (None, ""):
+            return Response(
+                {"company_id": ["Super Admin cannot belong to a company."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        company = None
+    elif role in COMPANY_SCOPED_ROLES:
+        if not company:
+            return Response(
+                {"company_id": [f"Company is required when creating a {role.title()} user."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    serializer = CreateUserSerializer(data=data)
+    if serializer.is_valid():
+        try:
+            with transaction.atomic():
+                new_user = serializer.save(company=company)
+
+                email_sent = False
+                if role in AUTO_PASSWORD_EMAIL_ROLES:
+                    issue_and_send_temporary_password(
+                        user=new_user,
+                        purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
+                        issued_by=request.user if request.user.is_authenticated else None,
+                        recipient_name=new_user.get_full_name() or new_user.username or new_user.email,
+                    )
+                    email_sent = True
+
+                log_action(
+                    request, "CREATE", "User",
+                    object_id=new_user.id,
+                    description=f"Platform user created: {new_user.username} ({new_user.email})",
+                    company=company,
+                )
+        except TemporaryPasswordEmailError as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception:
+            logger.exception("Failed to create user with role %s", role)
+            return Response(
+                {"error": "Failed to create user. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        response_payload = {
+            "message": "User created successfully",
+            "user_id": new_user.id,
+        }
+        if role in AUTO_PASSWORD_EMAIL_ROLES:
+            response_payload["temporary_password_email_sent"] = email_sent
+        return Response(response_payload, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -140,7 +516,7 @@ def create_user(request):
 @api_view(['PATCH'])
 @permission_classes([IsSuperAdmin])
 def update_user_role(request, user_id):
-
+    # Only Super Admin can change roles; no tenant check needed
     user = get_object_or_404(User, id=user_id)
 
     # 🚫 Prevent self role change
@@ -170,7 +546,6 @@ def update_user_role(request, user_id):
 @api_view(['DELETE'])
 @permission_classes([IsAdmin | IsSuperAdmin])
 def delete_user(request, user_id):
-
     user = get_object_or_404(User, id=user_id)
 
     if user == request.user:
@@ -179,8 +554,99 @@ def delete_user(request, user_id):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    # Tenant isolation: Company Admin can only delete users in their company
+    if request.user.role == "ADMIN":
+        if getattr(user, "company_id", None) != getattr(request.user, "company_id", None):
+            return Response(
+                {"error": "You can only delete users belonging to your company."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
     user.delete()
     return Response({"message": "User deleted successfully"})
+
+
+# =========================================================
+# 🔑 SUPER ADMIN: RESET USER PASSWORD (send temp password email)
+# =========================================================
+
+@api_view(["POST"])
+@permission_classes([IsSuperAdmin])
+def superadmin_reset_password(request, user_id):
+    user = get_object_or_404(User, id=user_id)
+    try:
+        with transaction.atomic():
+            issue_and_send_temporary_password(
+                user=user,
+                purpose=TemporaryPasswordRecord.PURPOSE_PASSWORD_RESET,
+                recipient_name=user.get_full_name() or user.username,
+            )
+    except TemporaryPasswordEmailError as exc:
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception:
+        logger.exception("SuperAdmin password reset failed for user %s", user_id)
+        return Response(
+            {"error": "Failed to send temporary password email. Check SMTP settings."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    log_action(
+        request, "PASSWORD_RESET", "User",
+        object_id=user.id,
+        description=f"SuperAdmin reset password for {user.email}",
+        company=getattr(user, "company", None),
+    )
+    return Response({"message": "Temporary password sent to user's email"})
+
+
+# =========================================================
+# 🚫 SUPER ADMIN: BLOCK / UNBLOCK USER
+# =========================================================
+
+@api_view(["PATCH"])
+@permission_classes([IsSuperAdmin])
+def superadmin_block_user(request, user_id):
+    user = get_object_or_404(User, id=user_id)
+    if user == request.user:
+        return Response(
+            {"error": "You cannot block yourself"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    is_active = request.data.get("is_active")
+    if is_active is None:
+        return Response(
+            {"error": "is_active (true/false) is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    user.is_active = bool(is_active)
+    if user.is_active:
+        user.is_locked = False
+        user.failed_attempts = 0
+        user.locked_at = None
+        user.save(update_fields=["is_active", "is_locked", "failed_attempts", "locked_at"])
+    else:
+        user.save(update_fields=["is_active"])
+    return Response({
+        "message": "User unblocked" if user.is_active else "User blocked",
+        "is_active": user.is_active,
+    })
+
+
+# =========================================================
+# 🔓 SUPER ADMIN: UNLOCK USER (clear lock from failed attempts)
+# =========================================================
+
+@api_view(["POST"])
+@permission_classes([IsSuperAdmin])
+def superadmin_unlock_user(request, user_id):
+    user = get_object_or_404(User, id=user_id)
+    user.is_locked = False
+    user.failed_attempts = 0
+    user.locked_at = None
+    user.save(update_fields=["is_locked", "failed_attempts", "locked_at"])
+    return Response({"message": "User unlocked", "is_locked": False})
 
 
 # =========================================================
@@ -201,11 +667,13 @@ def change_password(request):
 
     user = request.user
 
-    user.set_password(new_password)   # 🔥 IMPORTANT
-    user.must_change_password = False
-    user.failed_attempts = 0
-    user.is_locked = False
-    user.save()
+    try:
+        _set_new_password(user, new_password)
+    except DjangoValidationError as exc:
+        return Response(
+            {"error": exc.messages[0]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     return Response({"message": "Password changed successfully"})
 
@@ -236,12 +704,13 @@ def change_password_with_old(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Set new password
-    user.set_password(new_password)
-    user.must_change_password = False
-    user.failed_attempts = 0
-    user.is_locked = False
-    user.save()
+    try:
+        _set_new_password(user, new_password)
+    except DjangoValidationError as exc:
+        return Response(
+            {"error": exc.messages[0]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     return Response({"message": "Password changed successfully"})
 
@@ -253,11 +722,6 @@ def change_password_with_old(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def forgot_password(request):
-    from django.core.mail import EmailMultiAlternatives
-    from django.contrib.auth.hashers import make_password
-    import random
-    import string
-
     email = request.data.get("email")
 
     if not email:
@@ -273,73 +737,40 @@ def forgot_password(request):
             {"error": "No user found with this email"},
             status=status.HTTP_404_NOT_FOUND
         )
-
-    # Generate temporary password
-    temp_password = ''.join(
-        random.choices(string.ascii_letters + string.digits, k=10)
-    )
-
-    # Update user
-    user.password = make_password(temp_password)
-    user.must_change_password = True
-    user.failed_attempts = 0
-    user.is_locked = False
-    user.save()
-
-    # Send email
-    try:
-        subject = "HRMS - Temporary Password"
-        
-        text_content = f"""
-Hello {user.username},
-
-Your temporary password is: {temp_password}
-
-Please login and change your password immediately.
-
-Login URL: http://localhost:5173/login
-
-Regards,
-HRMS Team
-"""
-
-        html_content = f"""
-<div style="font-family: Arial; padding: 20px;">
-    <h2>Password Reset Request</h2>
-    <p>Hello <strong>{user.username}</strong>,</p>
-    <p>Your temporary password is:</p>
-    <h3 style="background: #f1f5f9; padding: 15px; border-radius: 8px; display: inline-block;">{temp_password}</h3>
-    <p style="color: red;">⚠️ Please login and change your password immediately.</p>
-    <p>
-        <a href="http://localhost:5173/login" 
-           style="background:#2563eb; color:white; padding:12px 24px; 
-           text-decoration:none; border-radius:8px; display:inline-block;">
-            Login to HRMS
-        </a>
-    </p>
-    <p>Regards,<br><strong>HRMS Team</strong></p>
-</div>
-"""
-
-        email_message = EmailMultiAlternatives(
-            subject,
-            text_content,
-            settings.DEFAULT_FROM_EMAIL,
-            [email],
-        )
-        email_message.attach_alternative(html_content, "text/html")
-        email_message.send(fail_silently=False)
-
-        return Response({
-            "message": "Temporary password sent to your email"
-        })
-
-    except Exception as e:
+    except User.MultipleObjectsReturned:
         return Response(
-            {"error": f"Failed to send email: {str(e)}"},
+            {"error": "Multiple accounts exist with this email. Please contact support."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        with transaction.atomic():
+            issue_and_send_temporary_password(
+                user=user,
+                purpose=TemporaryPasswordRecord.PURPOSE_PASSWORD_RESET,
+                recipient_name=user.get_full_name() or user.username,
+            )
+    except TemporaryPasswordEmailError as exc:
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception:
+        logger.exception("Temporary password reset failed for %s", email)
+        return Response(
+            {"error": "Failed to issue a temporary password. Please try again later."},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+    log_action(
+        request, "PASSWORD_RESET", "User",
+        object_id=user.id,
+        description=f"Password reset requested for {user.email}",
+        company=getattr(user, "company", None),
+    )
+    return Response({
+        "message": "Temporary password sent to your email"
+    })
 
 
 # =========================================================
@@ -349,17 +780,50 @@ HRMS Team
 @api_view(["GET"])
 @permission_classes([IsSuperAdmin])
 def superadmin_analytics(request):
-
+    # SuperAdmin sees system-wide stats (all tenants)
     total_users = User.objects.count()
     total_employees = Employee.objects.count()
     total_leaves = LeaveRequest.objects.count()
     total_payslips = Payslip.objects.count()
     total_attendance = Attendance.objects.count()
+    # Companies: total registered, active, inactive/suspended
+    total_companies_registered = Company.objects.count()
+    active_companies = Company.objects.filter(is_active=True).count()
+    inactive_companies = Company.objects.filter(is_active=False).count()
+    total_companies = active_companies  # backward compat
 
-    role_distribution = (
-        User.objects.values("role")
-        .annotate(count=Count("id"))
+    # Total payroll processed (sum of net_pay across all payslips)
+    payroll_aggregate = Payslip.objects.aggregate(total=Sum("net_pay"))
+    total_payroll_processed = float(payroll_aggregate["total"] or 0)
+
+    # HR/Admin users (ADMIN + HR roles)
+    hr_admin_count = User.objects.filter(role__in=["ADMIN", "HR"]).count()
+
+    role_distribution = list(
+        User.objects.values("role").annotate(count=Count("id"))
     )
+
+    # Per-company summary for dashboard
+    companies_summary = list(
+        Company.objects.filter(is_active=True)
+        .annotate(
+            user_count=Count("users", distinct=True),
+            employee_count=Count("employees", distinct=True),
+        )
+        .values("id", "name", "company_code", "user_count", "employee_count", "is_active")
+    )
+
+    # Recent company registrations (last 10)
+    recent_companies = list(
+        Company.objects.all()
+        .order_by("-created_at")[:10]
+        .values("id", "name", "company_code", "created_at", "is_active")
+    )
+    for c in recent_companies:
+        c["created_at"] = c["created_at"].isoformat() if c.get("created_at") else None
+
+    # Simple system health: OK if no critical issues
+    system_health = "Healthy"
 
     return Response({
         "total_users": total_users,
@@ -367,8 +831,344 @@ def superadmin_analytics(request):
         "total_leaves": total_leaves,
         "total_payslips": total_payslips,
         "total_attendance": total_attendance,
+        "total_companies": total_companies,
+        "total_companies_registered": total_companies_registered,
+        "active_companies": active_companies,
+        "inactive_companies": inactive_companies,
+        "total_payroll_processed": total_payroll_processed,
+        "hr_admin_count": hr_admin_count,
+        "recent_companies": recent_companies,
+        "system_health": system_health,
         "role_distribution": role_distribution,
+        "companies_summary": companies_summary,
     })
+
+
+# =========================================================
+# 🏢 COMPANIES (TENANTS) – SuperAdmin CRUD
+# =========================================================
+
+@api_view(["GET"])
+@permission_classes([IsSuperAdmin])
+def company_list(request):
+    is_active = request.query_params.get("is_active")
+    qs = (
+        Company.objects.annotate(employee_count=Count("employees"))
+        .order_by("name")
+    )
+    if is_active is not None:
+        if str(is_active).lower() in ("true", "1"):
+            qs = qs.filter(is_active=True)
+        elif str(is_active).lower() in ("false", "0"):
+            qs = qs.filter(is_active=False)
+    serializer = CompanySerializer(qs, many=True, context={"request": request})
+    return Response(serializer.data)
+
+
+@api_view(["POST"])
+@permission_classes([IsSuperAdmin])
+def company_create(request):
+    """
+    Create a company (tenant). Optionally create the Company Admin in the same request.
+    Payload: company fields (name, company_code, domain, email, ...) plus optional:
+      - admin_email (required if creating admin)
+      - admin_first_name, admin_last_name (optional)
+    When admin_email is provided, a User with role=ADMIN and company=new_company is created
+    and a temporary password is sent to admin_email.
+    """
+    data = request.data.copy()
+    admin_email = (data.pop("admin_email", None) or "").strip().lower()
+    admin_first_name = (data.pop("admin_first_name", None) or "").strip()
+    admin_last_name = (data.pop("admin_last_name", None) or "").strip()
+
+    serializer = CompanySerializer(data=data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    if admin_email and User.objects.filter(email=admin_email).exists():
+        return Response(
+            {"admin_email": ["A user with this email already exists."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        with transaction.atomic():
+            company = serializer.save()
+            log_action(
+                request, "CREATE", "Company",
+                object_id=company.id,
+                description=f"Company created: {company.name}",
+                company=company,
+            )
+            admin_user = None
+            if admin_email:
+                admin_user = User.objects.create(
+                    username=admin_email,
+                    email=admin_email,
+                    first_name=admin_first_name,
+                    last_name=admin_last_name,
+                    role="ADMIN",
+                    company=company,
+                    must_change_password=True,
+                )
+                admin_user.set_unusable_password()
+                admin_user.save(update_fields=["password"])
+                issue_and_send_temporary_password(
+                    user=admin_user,
+                    purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
+                    issued_by=request.user if request.user.is_authenticated else None,
+                    recipient_name=admin_user.get_full_name() or admin_user.email,
+                )
+                log_action(
+                    request, "CREATE", "User",
+                    object_id=admin_user.id,
+                    description=f"Company Admin created with company: {admin_user.email}",
+                    company=company,
+                )
+            response_data = CompanySerializer(company, context={"request": request}).data
+            if admin_user:
+                response_data["admin_created"] = True
+                response_data["admin_id"] = admin_user.id
+                response_data["message"] = "Company and Company Admin created. Temporary password sent to admin email."
+            else:
+                response_data["message"] = "Company created successfully."
+            return Response(response_data, status=status.HTTP_201_CREATED)
+    except TemporaryPasswordEmailError as exc:
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception:
+        logger.exception("Company create failed")
+        return Response(
+            {"error": "Failed to create company. Please try again."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsSuperAdmin])
+def company_detail(request, company_id):
+    company = get_object_or_404(
+        Company.objects.annotate(employee_count=Count("employees")),
+        id=company_id,
+    )
+    serializer = CompanySerializer(company, context={"request": request})
+    return Response(serializer.data)
+
+
+@api_view(["PATCH", "PUT"])
+@permission_classes([IsSuperAdmin])
+def company_update(request, company_id):
+    company = get_object_or_404(Company, id=company_id)
+    serializer = CompanySerializer(
+        company,
+        data=request.data,
+        partial=True,
+        context={"request": request},
+    )
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST", "DELETE"])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def company_logo(request, company_id):
+    """
+    POST: multipart field `logo` — PNG/JPEG/WebP, max 2MB.
+    DELETE: remove stored logo (file + DB).
+    """
+    auth_error = _ensure_super_admin_for_logo(request)
+    if auth_error:
+        return auth_error
+
+    company = get_object_or_404(Company, id=company_id)
+    if not _can_manage_company_branding(request, company):
+        return Response(
+            {"detail": "You do not have permission to update this company logo."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    if request.method == "DELETE":
+        company.clear_logo_file()
+        company.save(update_fields=["logo"])
+        log_action(
+            request,
+            "UPDATE",
+            "Company",
+            object_id=company.id,
+            description=f"Company logo removed: {company.name}",
+            company=company,
+        )
+        data = CompanySerializer(company, context={"request": request}).data
+        data["logoUrl"] = data.get("logo_url")
+        return Response(data)
+
+    uploaded = request.FILES.get("logo")
+    if not uploaded:
+        return Response(
+            {"logo": ["No file was submitted."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    err = _company_logo_validation_error(uploaded)
+    if err:
+        return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
+
+    if company.logo:
+        company.logo.delete(save=False)
+
+    ext = os.path.splitext(uploaded.name or "")[1].lower()
+    if ext not in ALLOWED_LOGO_EXTENSIONS:
+        ext = ".png"
+    storage_name = f"{uuid.uuid4().hex}{ext}"
+    company.logo.save(storage_name, uploaded, save=True)
+
+    log_action(
+        request,
+        "UPDATE",
+        "Company",
+        object_id=company.id,
+        description=f"Company logo updated: {company.name}",
+        company=company,
+    )
+    data = CompanySerializer(company, context={"request": request}).data
+    data["logoUrl"] = data.get("logo_url")
+    return Response(data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def company_branding(request):
+    company = _get_request_company(request)
+    if not company:
+        return Response({"detail": "No company context found."}, status=status.HTTP_403_FORBIDDEN)
+    if not _can_read_company_branding(request, company):
+        return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+    data = CompanySerializer(company, context={"request": request}).data
+    data["logoUrl"] = data.get("logo_url")
+    return Response(data)
+
+
+@api_view(["POST", "DELETE"])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def company_branding_logo(request):
+    company = _get_request_company(request)
+    if not company:
+        return Response({"detail": "No company context found."}, status=status.HTTP_403_FORBIDDEN)
+    if not _can_manage_company_branding(request, company):
+        return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == "DELETE":
+        company.clear_logo_file()
+        company.save(update_fields=["logo", "updated_at"])
+        data = CompanySerializer(company, context={"request": request}).data
+        data["logoUrl"] = data.get("logo_url")
+        return Response(data)
+
+    uploaded = request.FILES.get("logo")
+    if not uploaded:
+        return Response({"logo": ["No file was submitted."]}, status=status.HTTP_400_BAD_REQUEST)
+
+    err = _company_logo_validation_error(uploaded)
+    if err:
+        return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
+
+    if company.logo:
+        company.logo.delete(save=False)
+
+    ext = os.path.splitext(uploaded.name or "")[1].lower()
+    if ext not in ALLOWED_LOGO_EXTENSIONS:
+        ext = ".png"
+    storage_name = f"{uuid.uuid4().hex}{ext}"
+    company.logo.save(storage_name, uploaded, save=True)
+    data = CompanySerializer(company, context={"request": request}).data
+    data["logoUrl"] = data.get("logo_url")
+    return Response(data)
+
+
+@api_view(["DELETE"])
+@permission_classes([IsSuperAdmin])
+def company_delete(request, company_id):
+    company = get_object_or_404(Company, id=company_id)
+    # Soft delete: deactivate (Suspend)
+    company.is_active = False
+    company.save(update_fields=["is_active"])
+    return Response({"message": "Company deactivated successfully"})
+
+
+@api_view(["POST"])
+@permission_classes([IsSuperAdmin])
+def company_activate(request, company_id):
+    company = get_object_or_404(Company, id=company_id)
+    company.is_active = True
+    company.save(update_fields=["is_active"])
+    return Response({"message": "Company activated successfully"})
+
+
+@api_view(["POST"])
+@permission_classes([IsSuperAdmin])
+def company_stop_actions(request, company_id):
+    company = get_object_or_404(Company, id=company_id)
+    company.billing_action_stopped = True
+    company.save(update_fields=["billing_action_stopped"])
+    log_action(
+        request, "UPDATE", "Company",
+        object_id=company.id,
+        description=f"Stopped billing actions for company: {company.name}",
+        company=company,
+    )
+    return Response({
+        "message": "Company actions stopped successfully.",
+        "company": CompanySerializer(company, context={"request": request}).data
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsSuperAdmin])
+def company_mark_paid(request, company_id):
+    company = get_object_or_404(Company, id=company_id)
+    # Default: extend subscription end date by 30 days from today
+    today = timezone.now().date()
+    new_end_date = today + timedelta(days=30)
+    
+    custom_date = request.data.get("subscription_period_end")
+    if custom_date:
+        try:
+            from datetime import datetime
+            new_end_date = datetime.strptime(custom_date, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+
+    company.subscription_period_end = new_end_date
+    company.billing_action_stopped = False
+    company.save(update_fields=["subscription_period_end", "billing_action_stopped"])
+    
+    log_action(
+        request, "UPDATE", "Company",
+        object_id=company.id,
+        description=f"Marked company as paid and extended subscription to {new_end_date}: {company.name}",
+        company=company,
+    )
+    return Response({
+        "message": "Company marked as paid. Actions restored.",
+        "company": CompanySerializer(company, context={"request": request}).data
+    })
+
+
+@api_view(["DELETE"])
+@permission_classes([IsSuperAdmin])
+def company_hard_delete(request, company_id):
+    company = get_object_or_404(Company, id=company_id)
+    company_name = company.name
+    if company.logo:
+        company.logo.delete(save=False)
+    company.delete()
+    return Response({"message": f"Company '{company_name}' permanently deleted"})
 
 
 # =========================================================
@@ -450,7 +1250,8 @@ def me(request):
             "employee_id": emp.employee_id,
             "first_name": emp.first_name,
             "last_name": emp.last_name,
-            "company": emp.company.name if emp.company else None
+            "company": emp.company.name if getattr(emp, "company", None) else None,
+            "company_id": emp.company_id,
         })
 
     return Response(data)

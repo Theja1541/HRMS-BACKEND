@@ -1,64 +1,204 @@
-from rest_framework import serializers
 from django.contrib.auth import authenticate, get_user_model
-from .models import User
+from django.utils import timezone
+from rest_framework import serializers
+
+from .models import User, Company
+from apps.superadmin.services import (
+    get_int_setting,
+    validate_password_against_settings,
+)
 
 
-# ===========================
-# CREATE USER
-# ===========================
+class CompanySerializer(serializers.ModelSerializer):
+    employee_count = serializers.IntegerField(read_only=True, required=False)
+    pricing_plan_name = serializers.CharField(
+        source="pricing_plan.name", read_only=True, allow_null=True
+    )
+    pricing_plan_price = serializers.DecimalField(
+        source="pricing_plan.price_monthly", max_digits=12, decimal_places=2, read_only=True, allow_null=True
+    )
+    pricing_plan_currency = serializers.CharField(
+        source="pricing_plan.currency", read_only=True, allow_null=True
+    )
+    logo_url = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = Company
+        fields = [
+            "id",
+            "name",
+            "company_code",
+            "domain",
+            "email",
+            "phone",
+            "address",
+            "plan",
+            "is_active",
+            "created_at",
+            "updated_at",
+            "employee_count",
+            "pricing_plan",
+            "pricing_plan_name",
+            "pricing_plan_price",
+            "pricing_plan_currency",
+            "subscription_period_end",
+            "billing_action_stopped",
+            "logo_url",
+        ]
+        read_only_fields = [
+            "created_at",
+            "updated_at",
+            "employee_count",
+            "pricing_plan_name",
+            "pricing_plan_price",
+            "pricing_plan_currency",
+            "logo_url",
+        ]
+
+    def get_logo_url(self, obj):
+        if not obj.logo or not getattr(obj.logo, "name", None):
+            return None
+        request = self.context.get("request")
+        try:
+            url = obj.logo.url
+        except ValueError:
+            return None
+        version = int(obj.updated_at.timestamp()) if getattr(obj, "updated_at", None) else None
+        if version:
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}v={version}"
+        if request:
+            return request.build_absolute_uri(url)
+        return url
+from .services.temporary_passwords import (
+    TemporaryPasswordConsumedError,
+    TemporaryPasswordExpiredError,
+    TemporaryPasswordInvalidatedError,
+    validate_temporary_password_login,
+)
+
+
 class CreateUserSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True)
+    password = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=False,
+    )
 
     class Meta:
         model = User
-        fields = ["username", "email", "password", "role"]
+        fields = ["username", "email", "password", "role", "first_name", "last_name"]
 
-    def create(self, validated_data):
-        password = validated_data.pop("password")
+    def validate(self, attrs):
+        role = str(attrs.get("role") or "").upper().strip()
+        email = str(attrs.get("email") or "").strip().lower()
+        username = str(attrs.get("username") or "").strip()
+        password = attrs.get("password") or ""
+        valid_roles = {choice[0] for choice in User.ROLE_CHOICES}
+
+        if role not in valid_roles:
+            raise serializers.ValidationError(
+                {"role": "Invalid role selected."}
+            )
+
+        if not email:
+            raise serializers.ValidationError(
+                {"email": "Email is required."}
+            )
+
+        if User.objects.filter(email=email).exists():
+            raise serializers.ValidationError(
+                {"email": "A user with this email already exists."}
+            )
+
+        attrs["role"] = role
+        attrs["email"] = email
+        attrs["username"] = username or email
+
+        # Company Admin and HR onboarding use a generated temporary password by email.
+        if role in {"ADMIN", "HR"}:
+            attrs.pop("password", None)
+            return attrs
+
+        if not password:
+            raise serializers.ValidationError(
+                {"password": "Password is required for this role."}
+            )
+
+        password_error = validate_password_against_settings(password)
+        if password_error:
+            raise serializers.ValidationError(
+                {"password": password_error}
+            )
+
+        return attrs
+
+    def create(self, validated_data, **kwargs):
+        password = validated_data.pop("password", None)
+        company = kwargs.pop("company", None)
         user = User(**validated_data)
-        user.set_password(password)
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
+        user.must_change_password = False
+        user.failed_attempts = 0
+        user.is_locked = False
+        user.locked_at = None
+        # Tenant Admin (and any API-created user) must NOT have Django admin access
+        user.is_superuser = False
+        user.is_staff = False
+        if company is not None:
+            user.company = company
         user.save()
         return user
 
 
-# ===========================
-# USER SERIALIZER (MISSING)
-# ===========================
 class UserSerializer(serializers.ModelSerializer):
+    company_name = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ["id", "username", "email", "role", "phone"]
+        fields = [
+            "id",
+            "username",
+            "first_name",
+            "last_name",
+            "email",
+            "role",
+            "company",
+            "company_name",
+            "phone",
+            "must_change_password",
+            "is_locked",
+            "is_active",
+            "created_at",
+        ]
 
-
-# ===========================
-# LOGIN SERIALIZER
-# ===========================
-from rest_framework import serializers
-from django.contrib.auth import get_user_model, authenticate
-
-
-from rest_framework import serializers
-from django.contrib.auth import get_user_model, authenticate
-from django.utils import timezone
+    def get_company_name(self, obj):
+        return obj.company.name if getattr(obj, "company", None) else None
 
 
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
 
-    MAX_FAILED_ATTEMPTS = 5
-
     def validate(self, data):
         email = data.get("email")
         password = data.get("password")
 
-        User = get_user_model()
+        user_model = get_user_model()
 
         try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
+            user = user_model.objects.get(email=email)
+        except user_model.DoesNotExist:
             raise serializers.ValidationError(
                 {"email": "No account found with this email"}
+            )
+        except user_model.MultipleObjectsReturned:
+            raise serializers.ValidationError(
+                {"email": "Multiple accounts exist with this email. Please contact support."}
             )
 
         if user.is_locked:
@@ -68,33 +208,49 @@ class LoginSerializer(serializers.Serializer):
 
         authenticated_user = authenticate(
             username=user.username,
-            password=password
+            password=password,
         )
 
         if not authenticated_user:
             user.failed_attempts += 1
 
-            if user.failed_attempts >= self.MAX_FAILED_ATTEMPTS:
+            max_failed_attempts = get_int_setting(
+                "max_login_attempts", 5, minimum=1
+            )
+            if user.failed_attempts >= max_failed_attempts:
                 user.is_locked = True
                 user.locked_at = timezone.now()
 
-            user.save()
+            user.save(update_fields=["failed_attempts", "is_locked", "locked_at"])
 
             raise serializers.ValidationError(
                 {"password": "Invalid password"}
             )
-
-        # Reset failed attempts
-        user.failed_attempts = 0
-        user.save()
 
         if not user.is_active:
             raise serializers.ValidationError(
                 {"detail": "User is inactive"}
             )
 
-        # 🔥 DO NOT block must_change_password here
+        try:
+            temporary_password_record = validate_temporary_password_login(
+                user=user,
+                raw_password=password,
+            )
+        except (
+            TemporaryPasswordConsumedError,
+            TemporaryPasswordExpiredError,
+            TemporaryPasswordInvalidatedError,
+        ) as exc:
+            raise serializers.ValidationError({"password": str(exc)}) from exc
+
+        user.failed_attempts = 0
+        user.is_locked = False
+        user.locked_at = None
+        user.save(update_fields=["failed_attempts", "is_locked", "locked_at"])
+
         data["user"] = user
+        data["temporary_password_record"] = temporary_password_record
         return data
 
 # ===========================

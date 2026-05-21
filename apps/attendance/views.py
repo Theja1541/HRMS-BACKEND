@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAdminUser
 from .models import Attendance, Holiday
+from .constants import ATTENDANCE_STATUS_CHOICES
 from .serializers import AttendanceSerializer
 from apps.accounts.permissions import IsEmployee, IsHR
 from apps.employees.models import Employee
@@ -52,6 +53,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from apps.accounts.permissions import IsHR
 from apps.attendance.utils import is_payroll_closed
+from apps.accounts.tenant_utils import get_current_company
 from apps.payroll.utils.payroll_helpers import (
     is_payroll_closed,
     is_super_admin,
@@ -137,10 +139,13 @@ def check_in(request):
             status=status.HTTP_400_BAD_REQUEST
             )
 
+    defaults = {"status": "PRESENT"}
+    if getattr(employee, "company_id", None):
+        defaults["company_id"] = employee.company_id
     attendance, created = Attendance.objects.get_or_create(
         employee=employee,
         date=today,
-        defaults={"status": "PRESENT"}
+        defaults=defaults
     )
 
     if attendance.check_in:
@@ -370,6 +375,9 @@ def monthly_report(request):
         date__year=year,
         date__month=month_num
     )
+    company = get_current_company(request)
+    if company is not None:
+        records = records.filter(company=company)
 
     serializer = AttendanceSerializer(records, many=True)
     return Response(serializer.data)
@@ -445,7 +453,7 @@ def mark_attendance(request):
     date_value = request.data.get("date")  # YYYY-MM-DD
     status_value = request.data.get("status")  # PRESENT / ABSENT / LEAVE etc.
     check_in_value = request.data.get("check_in")  # Optional (ISO format)
-    edit_reason = request.data.get("edit_reason")  # Required for edits
+    edit_reason = request.data.get("edit_reason") or ""  # Optional; default used when updating
 
     # ============================
     # VALIDATION
@@ -457,13 +465,7 @@ def mark_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    if not edit_reason:
-        return Response(
-            {"error": "edit_reason is required"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    valid_statuses = dict(Attendance.STATUS_CHOICES).keys()
+    valid_statuses = [choice[0] for choice in ATTENDANCE_STATUS_CHOICES]
 
     if status_value.upper() not in valid_statuses:
         return Response(
@@ -471,8 +473,12 @@ def mark_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    company = get_current_company(request)
+    qs = Employee.objects.filter(id=employee_id)
+    if company is not None:
+        qs = qs.filter(company=company)
     try:
-        employee = Employee.objects.get(id=employee_id)
+        employee = qs.get()
     except Employee.DoesNotExist:
         return Response(
             {"error": "Employee not found"},
@@ -496,9 +502,13 @@ def mark_attendance(request):
     # CREATE OR UPDATE ATTENDANCE
     # ============================
 
+    defaults = {}
+    if getattr(employee, "company_id", None):
+        defaults["company_id"] = employee.company_id
     attendance, created = Attendance.objects.get_or_create(
         employee=employee,
-        date=parsed_date
+        date=parsed_date,
+        defaults=defaults
     )
 
     # Store previous status for edit tracking
@@ -506,10 +516,10 @@ def mark_attendance(request):
 
     attendance.status = status_value.upper()
 
-    # Track edit
+    # Track edit (only when updating existing record)
     if not created:
         attendance.is_edited = True
-        attendance.edit_reason = edit_reason
+        attendance.edit_reason = edit_reason.strip() or "Updated from Daily Attendance"
         attendance.edited_by = request.user
         attendance.edited_at = timezone.now()
         attendance.previous_status = previous_status
@@ -597,7 +607,7 @@ def mark_attendance(request):
 def bulk_mark_attendance(request):
     date_value = request.data.get("date")
     status_value = request.data.get("status")
-    edit_reason = request.data.get("edit_reason")  # Required
+    edit_reason = request.data.get("edit_reason") or "Bulk applied from Daily Attendance"
 
     if not date_value or not status_value:
         return Response(
@@ -605,13 +615,7 @@ def bulk_mark_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    if not edit_reason:
-        return Response(
-            {"error": "edit_reason is required"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    valid_statuses = dict(Attendance.STATUS_CHOICES).keys()
+    valid_statuses = [choice[0] for choice in ATTENDANCE_STATUS_CHOICES]
 
     if status_value.upper() not in valid_statuses:
         return Response(
@@ -632,23 +636,29 @@ def bulk_mark_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    company = get_current_company(request)
     employees = Employee.objects.filter(is_active=True)
+    if company is not None:
+        employees = employees.filter(company=company)
 
     updated_count = 0
     created_count = 0
 
     for emp in employees:
+        defaults = {"status": status_value.upper()}
+        if getattr(emp, "company_id", None):
+            defaults["company_id"] = emp.company_id
         attendance, created = Attendance.objects.get_or_create(
             employee=emp,
             date=parsed_date,
-            defaults={"status": status_value.upper()}
+            defaults=defaults
         )
 
         if not created:
             attendance.previous_status = attendance.status
             attendance.status = status_value.upper()
             attendance.is_edited = True
-            attendance.edit_reason = edit_reason
+            attendance.edit_reason = (edit_reason or "Bulk applied from Daily Attendance").strip()
             attendance.edited_by = request.user
             attendance.edited_at = timezone.now()
             attendance.save()

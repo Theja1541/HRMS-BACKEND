@@ -369,7 +369,9 @@ class Salary(models.Model):
 
     additional_benefits = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     ctc = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    revision_history = models.JSONField(default=list, blank=True)
 
+    created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def calculate_totals(self):
@@ -494,6 +496,10 @@ class PayslipEmailLog(models.Model):
     payslip = models.ForeignKey(Payslip, on_delete=models.CASCADE)
     email = models.EmailField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    paid_date = models.DateTimeField(null=True, blank=True)
+    bank_reference = models.CharField(max_length=100, blank=True, null=True)
+    email_sent = models.BooleanField(default=False)
+    email_sent_at = models.DateTimeField(null=True, blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
     error_message = models.TextField(blank=True, null=True)
 

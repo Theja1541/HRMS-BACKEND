@@ -153,7 +153,7 @@ class LeaveRequest(models.Model):
     )
 
     approved_on = models.DateTimeField(null=True, blank=True)
-
+    approval_trail = models.JSONField(default=list, blank=True)
     class Meta:
         indexes = [
             models.Index(fields=["employee", "status"]),

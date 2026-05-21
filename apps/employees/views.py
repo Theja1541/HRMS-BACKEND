@@ -212,47 +212,46 @@
 
 # hrms_backend/apps/employees/views.py
 
-from django.contrib.auth.hashers import make_password
+from datetime import date, timedelta
+
 from django.conf import settings
 from django.db import transaction
-from django.core.mail import EmailMultiAlternatives
+from django.db.models import Count, Q
 from django.utils import timezone
-from django.db.models import Count
-from rest_framework.viewsets import ModelViewSet
-from rest_framework.decorators import action
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import ValidationError
+from rest_framework.filters import OrderingFilter, SearchFilter
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
-from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.filters import SearchFilter, OrderingFilter
-import random
-import string
-from datetime import timedelta
-from .models import Employee, EmployeeHistory
-from .serializers import EmployeeListSerializer, EmployeeDetailSerializer
-from .permissions import IsHRorAdmin
-from apps.accounts.models import User
+from rest_framework.viewsets import ModelViewSet
+
+from apps.accounts.models import TemporaryPasswordRecord, User
+from apps.accounts.permissions import IsEmployee
+from apps.accounts.tenant_utils import TenantMixin, get_current_company
+from apps.audit.utils import log_action
+from apps.accounts.services.temporary_passwords import (
+    TemporaryPasswordEmailError,
+    issue_and_send_temporary_password,
+    send_temporary_password_email,
+)
 from apps.attendance.models import Attendance
 from apps.leaves.models import LeaveBalance, LeaveRequest
-from apps.payroll.models import Payslip
 from apps.notifications.models import Notification
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from django.utils import timezone
-from django.db.models import Count, Q
-from apps.accounts.permissions import IsEmployee
-from apps.leaves.models import LeaveRequest
-from apps.attendance.models import Attendance
-from apps.payroll.models import Payslip
-from apps.notifications.models import Notification
-from datetime import date
-import calendar
-import json
-from apps.payroll.models import Salary
+from apps.payroll.models import Payslip, Salary
+from apps.payroll.serializers import EmployeeSalarySerializer
+from .models import Employee
+from .permissions import IsHRorAdmin
+from .serializers import (
+    EmployeeDetailSerializer,
+    EmployeeListSerializer,
+    parse_salary_payload,
+    save_employee_salary,
+)
 
 
-class EmployeeViewSet(ModelViewSet):
+class EmployeeViewSet(TenantMixin, ModelViewSet):
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -274,26 +273,34 @@ class EmployeeViewSet(ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        is_active = self.request.query_params.get('is_active', 'true')
-        role_filter = self.request.query_params.get('role', None)
+        company = get_current_company(self.request)
+        is_active = self.request.query_params.get("is_active", "true")
+        role_filter = self.request.query_params.get("role")
 
         if user.role == "EMPLOYEE":
-            return Employee.objects.filter(user=user, is_active=True).select_related("salary")
-
-        # For activate action, we need to access inactive employees
-        if self.action == 'activate':
-            return Employee.objects.filter(is_active=False).select_related("user", "salary")
-
-        if is_active.lower() == 'false':
-            queryset = Employee.objects.filter(is_active=False).select_related("user", "salary")
+            base = Employee.objects.filter(user=user, is_active=True)
         else:
-            queryset = Employee.objects.filter(is_active=True).select_related("user", "salary")
-        
-        # Filter by role if provided
-        if role_filter:
-            queryset = queryset.filter(designation__icontains=role_filter)
-        
-        return queryset
+            # Tenant isolation: restrict to current company (SuperAdmin with no company sees all)
+            base = Employee.objects.all()
+            if company is not None:
+                base = base.filter(company=company)
+            # SuperAdmin can filter by company_id query param (e.g. for company detail page)
+            if user.role == "SUPER_ADMIN":
+                company_id = self.request.query_params.get("company_id")
+                if company_id:
+                    base = base.filter(company_id=company_id)
+
+            if self.action == "activate":
+                base = base.filter(is_active=False)
+            elif str(is_active).lower() == "false":
+                base = base.filter(is_active=False)
+            else:
+                base = base.filter(is_active=True)
+
+            if role_filter:
+                base = base.filter(designation__icontains=role_filter)
+
+        return base.select_related("user", "salary", "company")
     # =====================================================
     # SERIALIZER
     # =====================================================
@@ -308,7 +315,19 @@ class EmployeeViewSet(ModelViewSet):
     # =====================================================
 
     def get_permissions(self):
-        if self.action in ["create", "update", "partial_update", "destroy"]:
+        if self.action in [
+            "create",
+            "update",
+            "partial_update",
+            "destroy",
+            "activate",
+            "resend_onboarding_credentials",
+            "salary",
+            "roles",
+            "delete_role",
+            "departments",
+            "delete_department",
+        ]:
             return [IsHRorAdmin()]
         return [IsAuthenticated()]
 
@@ -318,70 +337,80 @@ class EmployeeViewSet(ModelViewSet):
 
 
     def perform_create(self, serializer):
+        company = get_current_company(self.request)
+        if company is None and self.request.user.role != "SUPER_ADMIN":
+            raise ValidationError("Cannot create employee: no company context.")
 
         email = serializer.validated_data.get("email")
-        role = self.request.data.get("role", "EMPLOYEE")
+        requested_role = str(self.request.data.get("role", "EMPLOYEE")).upper().strip()
+        valid_roles = {choice[0] for choice in User.ROLE_CHOICES}
+        role = requested_role if requested_role in valid_roles else "EMPLOYEE"
 
-        if User.objects.filter(username=email).exists():
+        # Login is email-based, so user email must remain globally unique.
+        if User.objects.filter(email=email).exists():
             raise ValidationError("User with this email already exists.")
 
-        temp_password = ''.join(
-            random.choices(string.ascii_letters + string.digits, k=10)
-        )
-
         with transaction.atomic():
-
             user = User.objects.create(
                 username=email,
                 email=email,
                 role=role,
-                password=make_password(temp_password),
+                company=company,
                 must_change_password=True,
             )
+            user.set_unusable_password()
+            user.save(update_fields=["password"])
 
-            employee = serializer.save(user=user, is_active=True)
+            employee = serializer.save(user=user, company=company, is_active=True)
 
+            log_action(
+                self.request, "CREATE", "Employee",
+                object_id=employee.id,
+                description=f"Admin created employee: {employee.first_name} {employee.last_name} ({employee.email})",
+                company=company,
+            )
             try:
-                self.send_onboarding_email(
-                    employee=employee,
-                    email=email,
-                    temp_password=temp_password
+                issue_and_send_temporary_password(
+                    user=user,
+                    purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
+                    issued_by=self.request.user if self.request.user.is_authenticated else None,
+                    recipient_name=employee.first_name,
                 )
-            except Exception:
-                pass
+            except TemporaryPasswordEmailError as exc:
+                raise ValidationError({"message": str(exc)}) from exc
 
     # =====================================================
     # UPDATE EMPLOYEE (WITH HISTORY)
     # =====================================================
 
     def perform_update(self, serializer):
-
-        request = self.request
-        salary_data = request.data.get("salary")
-
-        if salary_data and isinstance(salary_data, str):
-            salary_data = json.loads(salary_data)
+        instance = self.get_object()
+        tracked_fields = list(serializer.validated_data.keys())
+        old_values = {field: getattr(instance, field, None) for field in tracked_fields}
+        requested_role = str(self.request.data.get("role", "")).upper().strip()
 
         employee = serializer.save()
 
-        if salary_data and isinstance(salary_data, dict):
-            from decimal import Decimal
-            import decimal
-            
-            salary_obj, created = Salary.objects.get_or_create(employee=employee)
+        if requested_role and employee.user:
+            valid_roles = {choice[0] for choice in User.ROLE_CHOICES}
+            normalized_role = requested_role if requested_role in valid_roles else "EMPLOYEE"
+            if employee.user.role != normalized_role:
+                employee.user.role = normalized_role
+                employee.user.save(update_fields=["role"])
 
-            for key, value in salary_data.items():
-                if key == 'employee' or key == 'id':
-                    continue
-                    
-                if hasattr(salary_obj, key):
-                    try:
-                        decimal_value = Decimal(str(value)) if value not in ["", None] else Decimal("0")
-                        setattr(salary_obj, key, decimal_value)
-                    except (ValueError, TypeError, decimal.InvalidOperation):
-                        pass
-
-            salary_obj.save()
+        for field in tracked_fields:
+            old_value = old_values.get(field)
+            new_value = getattr(employee, field, None)
+            if str(old_value) != str(new_value):
+                # Append change to employee.history JSONField
+                employee.history.append({
+                    "field_name": field,
+                    "old_value": old_value,
+                    "new_value": new_value,
+                    "changed_by": self.request.user.id if self.request.user.is_authenticated else None,
+                    "changed_at": timezone.now().isoformat(),
+                })
+                employee.save(update_fields=["history"])
 
     # =====================================================
     # SOFT DELETE
@@ -431,56 +460,151 @@ class EmployeeViewSet(ModelViewSet):
         employee.save()
         return Response({"message": "Employee activated successfully"})
 
+    @action(detail=True, methods=["post"], url_path="resend-onboarding-credentials")
+    def resend_onboarding_credentials(self, request, pk=None):
+        employee = self.get_object()
+        user = employee.user
+
+        if not user:
+            raise ValidationError({"message": "This employee does not have a linked login account."})
+
+        try:
+            with transaction.atomic():
+                issue_and_send_temporary_password(
+                    user=user,
+                    purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
+                    issued_by=request.user if request.user.is_authenticated else None,
+                    recipient_name=employee.first_name,
+                )
+        except TemporaryPasswordEmailError as exc:
+            raise ValidationError({"message": str(exc)}) from exc
+
+        return Response({"message": "Onboarding credentials sent successfully."})
+
+    @action(detail=True, methods=["get", "put"], url_path="salary")
+    def salary(self, request, pk=None):
+        employee = self.get_object()
+
+        if request.method == "GET":
+            salary = Salary.objects.filter(employee=employee).first()
+            if not salary:
+                return Response(
+                    {"detail": "Salary structure not found."},
+                    status=404,
+                )
+            return Response(EmployeeSalarySerializer(salary).data)
+
+        raw_salary = request.data.get("salary", request.data)
+        salary_data = parse_salary_payload(raw_salary)
+
+        if salary_data is None:
+            raise ValidationError({"salary": "Salary payload is required."})
+
+        salary = save_employee_salary(employee, salary_data)
+        return Response(EmployeeSalarySerializer(salary).data)
+
     @action(detail=False, methods=["get", "post"])
     def roles(self, request):
         from .models import CustomRole
-        
+
+        company = get_current_company(request)
+        if company is None and request.user.role == "SUPER_ADMIN":
+            company_id = request.query_params.get("company_id") or request.data.get("company_id")
+            if company_id:
+                try:
+                    from apps.accounts.models import Company
+                    company = Company.objects.filter(id=company_id).first()
+                except Exception:
+                    pass
+
+        base_employees = Employee.objects.filter(is_active=True)
+        if company is not None:
+            base_employees = base_employees.filter(company=company)
+
         if request.method == "GET":
-            designations = Employee.objects.filter(is_active=True).values_list('designation', flat=True).distinct()
-            custom_roles = CustomRole.objects.all().values_list('name', flat=True)
+            designations = base_employees.values_list("designation", flat=True).distinct()
+            custom_roles = CustomRole.objects.filter(company=company).values_list("name", flat=True) if company else CustomRole.objects.values_list("name", flat=True)
             all_roles = list(set(list(designations) + list(custom_roles)))
             all_roles.sort()
             return Response({"roles": all_roles})
-        
+
         elif request.method == "POST":
-            role = request.data.get('role', '').strip()
+            role = request.data.get("role", "").strip()
             if not role:
                 return Response({"error": "Role name required"}, status=400)
-            
-            CustomRole.objects.get_or_create(name=role)
+            CustomRole.objects.get_or_create(company=company, name=role, defaults={"company": company})
             return Response({"message": "Role added successfully"})
 
     @action(detail=False, methods=["delete"], url_path="roles/(?P<role_name>[^/.]+)")
     def delete_role(self, request, role_name=None):
         from .models import CustomRole
-        
-        CustomRole.objects.filter(name=role_name).delete()
+
+        company = get_current_company(request)
+        if company is None and request.user.role == "SUPER_ADMIN":
+            company_id = request.query_params.get("company_id") or request.data.get("company_id")
+            if company_id:
+                try:
+                    from apps.accounts.models import Company
+                    company = Company.objects.filter(id=company_id).first()
+                except Exception:
+                    pass
+
+        qs = CustomRole.objects.filter(name=role_name)
+        if company is not None:
+            qs = qs.filter(company=company)
+        qs.delete()
         return Response({"message": "Role deleted successfully"})
 
     @action(detail=False, methods=["get", "post"])
     def departments(self, request):
         from .models import CustomDepartment
-        
+
+        company = get_current_company(request)
+        if company is None and request.user.role == "SUPER_ADMIN":
+            company_id = request.query_params.get("company_id") or request.data.get("company_id")
+            if company_id:
+                try:
+                    from apps.accounts.models import Company
+                    company = Company.objects.filter(id=company_id).first()
+                except Exception:
+                    pass
+
+        base_employees = Employee.objects.filter(is_active=True)
+        if company is not None:
+            base_employees = base_employees.filter(company=company)
+
         if request.method == "GET":
-            departments = Employee.objects.filter(is_active=True).values_list('department', flat=True).distinct()
-            custom_departments = CustomDepartment.objects.all().values_list('name', flat=True)
+            departments = base_employees.values_list("department", flat=True).distinct()
+            custom_departments = CustomDepartment.objects.filter(company=company).values_list("name", flat=True) if company else CustomDepartment.objects.values_list("name", flat=True)
             all_departments = list(set(list(departments) + list(custom_departments)))
             all_departments.sort()
             return Response({"departments": all_departments})
-        
+
         elif request.method == "POST":
-            department = request.data.get('department', '').strip()
+            department = request.data.get("department", "").strip()
             if not department:
                 return Response({"error": "Department name required"}, status=400)
-            
-            CustomDepartment.objects.get_or_create(name=department)
+            CustomDepartment.objects.get_or_create(company=company, name=department, defaults={"company": company})
             return Response({"message": "Department added successfully"})
 
     @action(detail=False, methods=["delete"], url_path="departments/(?P<department_name>[^/.]+)")
     def delete_department(self, request, department_name=None):
         from .models import CustomDepartment
-        
-        CustomDepartment.objects.filter(name=department_name).delete()
+
+        company = get_current_company(request)
+        if company is None and request.user.role == "SUPER_ADMIN":
+            company_id = request.query_params.get("company_id") or request.data.get("company_id")
+            if company_id:
+                try:
+                    from apps.accounts.models import Company
+                    company = Company.objects.filter(id=company_id).first()
+                except Exception:
+                    pass
+
+        qs = CustomDepartment.objects.filter(name=department_name)
+        if company is not None:
+            qs = qs.filter(company=company)
+        qs.delete()
         return Response({"message": "Department deleted successfully"})
 
     # =====================================================
@@ -585,11 +709,23 @@ class EmployeeViewSet(ModelViewSet):
         payroll = None
 
         if last_payslip:
+            gross_salary = (
+                (last_payslip.basic or 0)
+                + (last_payslip.da or 0)
+                + (last_payslip.hra or 0)
+                + (last_payslip.conveyance or 0)
+                + (last_payslip.medical or 0)
+                + (last_payslip.special_allowance or 0)
+            )
+            total_deductions = (
+                (last_payslip.fixed_deductions or 0)
+                + (last_payslip.lop_deduction or 0)
+            )
             payroll = {
                 "month": last_payslip.month,
-                "basic": last_payslip.basic_salary,
-                "allowances": last_payslip.allowances,
-                "deductions": last_payslip.deductions,
+                "basic": last_payslip.basic,
+                "gross_salary": gross_salary,
+                "deductions": total_deductions,
                 "net_salary": last_payslip.net_pay,
                 "status": last_payslip.status
             }
@@ -636,47 +772,12 @@ class EmployeeViewSet(ModelViewSet):
     # =====================================================
 
     def send_onboarding_email(self, employee, email, temp_password):
-
-        login_url = "http://localhost:5173/login"
-
-        subject = "Welcome to HRMS – Your Account Details"
-
-        text_content = f"""
-Hello {employee.first_name},
-
-Your HRMS account has been created.
-
-Username: {email}
-Temporary Password: {temp_password}
-
-Please login and change your password immediately.
-
-Login here: {login_url}
-
-Regards,
-HR Team
-"""
-
-        html_content = f"""
-<div style="font-family: Arial; padding: 20px;">
-    <h2>Welcome to HRMS 🎉</h2>
-    <p>Hello <strong>{employee.first_name}</strong>,</p>
-    <p>Your HRMS account has been created.</p>
-    <p><strong>Username:</strong> {email}</p>
-    <p><strong>Temporary Password:</strong> {temp_password}</p>
-    <p>Please change your password after login.</p>
-</div>
-"""
-
-        email_message = EmailMultiAlternatives(
-            subject,
-            text_content,
-            settings.DEFAULT_FROM_EMAIL,
-            [email],
+        send_temporary_password_email(
+            user=employee.user,
+            temp_password=temp_password,
+            purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
+            recipient_name=employee.first_name,
         )
-
-        email_message.attach_alternative(html_content, "text/html")
-        email_message.send(fail_silently=False)
 
 
 
@@ -768,57 +869,3 @@ def employee_dashboard(request):
         "salary_this_month": salary_this_month,
         "notifications_unread": notifications_unread
     })
-
-def create(self, request, *args, **kwargs):
-
-    salary_data = request.data.get("salary")
-
-    if salary_data:
-        import json
-        salary_data = json.loads(salary_data)
-
-    serializer = self.get_serializer(data=request.data)
-    serializer.is_valid(raise_exception=True)
-
-    employee = serializer.save()
-
-    # 🔥 CREATE SALARY
-    if salary_data:
-        from apps.payroll.models import Salary
-
-        Salary.objects.create(
-            employee=employee,
-            **salary_data
-        )
-
-    return Response(serializer.data)
-
-
-def update(self, request, *args, **kwargs):
-
-    salary_data = request.data.get("salary")
-
-    if salary_data:
-        import json
-        salary_data = json.loads(salary_data)
-
-    partial = kwargs.pop("partial", False)
-    instance = self.get_object()
-
-    serializer = self.get_serializer(instance, data=request.data, partial=partial)
-    serializer.is_valid(raise_exception=True)
-
-    employee = serializer.save()
-
-    # 🔥 UPDATE SALARY
-    if salary_data:
-        from apps.payroll.models import Salary
-
-        salary_obj, created = Salary.objects.get_or_create(employee=employee)
-
-        for key, value in salary_data.items():
-            setattr(salary_obj, key, value)
-
-        salary_obj.save()
-
-    return Response(serializer.data)

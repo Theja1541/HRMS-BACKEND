@@ -68,7 +68,10 @@ def generate_payslip_pdf(payslip):
     header_style = styles["Heading1"]
     header_style.alignment = 1  # center
 
-    elements.append(Paragraph("GMMC HRMS", header_style))
+    company = getattr(payslip.employee, "company", None) or getattr(payslip, "company", None)
+    company_name = getattr(company, "name", None) or getattr(settings, "PAYSLIP_COMPANY_NAME", "HRMS Company")
+
+    elements.append(Paragraph(company_name, header_style))
     elements.append(Spacer(1, 0.2 * inch))
 
     elements.append(Paragraph("Salary Payslip", styles["Heading2"]))
