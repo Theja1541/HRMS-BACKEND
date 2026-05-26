@@ -9,7 +9,9 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAdminUser
-from .models import Attendance, Holiday
+from .models import Attendance
+from apps.holidays.models import Holiday
+from .constants import ATTENDANCE_STATUS_CHOICES
 from .serializers import AttendanceSerializer
 from apps.accounts.permissions import IsEmployee, IsHR
 from apps.employees.models import Employee
@@ -23,9 +25,8 @@ from .tasks import send_monthly_attendance_manual
 from datetime import date, datetime
 import calendar
 from django.utils import timezone
-from apps.attendance.models import Holiday
-# from apps.attendance.models import Holiday, WeekendPolicy
-from apps.attendance.models import Holiday, WorkCalendar
+# from apps.attendance.models import WeekendPolicy
+from apps.attendance.models import WorkCalendar
 import calendar
 from datetime import timedelta
 from django.utils import timezone
@@ -40,11 +41,8 @@ from apps.employees.models import Employee
 from datetime import date
 import calendar
 from django.utils import timezone
-from apps.attendance.models import Holiday
-from datetime import date
-from django.utils import timezone
-from django.db import transaction
-from apps.attendance.models import Attendance, Holiday
+from apps.attendance.models import Attendance
+from apps.holidays.models import Holiday
 from apps.employees.models import Employee
 from apps.leaves.models import LeaveRequest
 from rest_framework.decorators import api_view, permission_classes
@@ -52,6 +50,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from apps.accounts.permissions import IsHR
 from apps.attendance.utils import is_payroll_closed
+from apps.accounts.tenant_utils import get_current_company
 from apps.payroll.utils.payroll_helpers import (
     is_payroll_closed,
     is_super_admin,
@@ -81,11 +80,20 @@ def calculate_working_days(year, month, employee=None):
     last_day = date(year, month, calendar.monthrange(year, month)[1])
 
     holidays = Holiday.objects.filter(
-        date__year=year,
-        date__month=month
-    ).values_list("date", flat=True)
-
-    holiday_dates = set(holidays)
+        from_date__year__lte=year,
+        to_date__year__gte=year,
+        from_date__month__lte=month,
+        to_date__month__gte=month,
+        is_active=True
+    )
+    
+    holiday_dates = set()
+    for h in holidays:
+        current = h.from_date
+        while current <= h.to_date:
+            if current.year == year and current.month == month:
+                holiday_dates.add(current)
+            current += timedelta(days=1)
 
     working_days = 0
     holiday_count = len(holiday_dates)
@@ -137,10 +145,13 @@ def check_in(request):
             status=status.HTTP_400_BAD_REQUEST
             )
 
+    defaults = {"status": "PRESENT"}
+    if getattr(employee, "company_id", None):
+        defaults["company_id"] = employee.company_id
     attendance, created = Attendance.objects.get_or_create(
         employee=employee,
         date=today,
-        defaults={"status": "PRESENT"}
+        defaults=defaults
     )
 
     if attendance.check_in:
@@ -370,6 +381,9 @@ def monthly_report(request):
         date__year=year,
         date__month=month_num
     )
+    company = get_current_company(request)
+    if company is not None:
+        records = records.filter(company=company)
 
     serializer = AttendanceSerializer(records, many=True)
     return Response(serializer.data)
@@ -445,7 +459,7 @@ def mark_attendance(request):
     date_value = request.data.get("date")  # YYYY-MM-DD
     status_value = request.data.get("status")  # PRESENT / ABSENT / LEAVE etc.
     check_in_value = request.data.get("check_in")  # Optional (ISO format)
-    edit_reason = request.data.get("edit_reason")  # Required for edits
+    edit_reason = request.data.get("edit_reason") or ""  # Optional; default used when updating
 
     # ============================
     # VALIDATION
@@ -457,13 +471,7 @@ def mark_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    if not edit_reason:
-        return Response(
-            {"error": "edit_reason is required"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    valid_statuses = dict(Attendance.STATUS_CHOICES).keys()
+    valid_statuses = [choice[0] for choice in ATTENDANCE_STATUS_CHOICES]
 
     if status_value.upper() not in valid_statuses:
         return Response(
@@ -471,8 +479,12 @@ def mark_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    company = get_current_company(request)
+    qs = Employee.objects.filter(id=employee_id)
+    if company is not None:
+        qs = qs.filter(user__company=company)
     try:
-        employee = Employee.objects.get(id=employee_id)
+        employee = qs.get()
     except Employee.DoesNotExist:
         return Response(
             {"error": "Employee not found"},
@@ -493,12 +505,28 @@ def mark_attendance(request):
         )
 
     # ============================
+    # HOLIDAY CHECK
+    # ============================
+    from apps.attendance.utils import is_holiday
+    is_hol, hol_obj = is_holiday(parsed_date, company=company)
+    
+    if is_hol and status_value.upper() == "ABSENT":
+        return Response(
+            {"error": f"Cannot mark absent on a holiday ({hol_obj.holiday_name})"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # ============================
     # CREATE OR UPDATE ATTENDANCE
     # ============================
 
+    defaults = {}
+    if getattr(employee, "company_id", None):
+        defaults["company_id"] = employee.company_id
     attendance, created = Attendance.objects.get_or_create(
         employee=employee,
-        date=parsed_date
+        date=parsed_date,
+        defaults=defaults
     )
 
     # Store previous status for edit tracking
@@ -506,10 +534,10 @@ def mark_attendance(request):
 
     attendance.status = status_value.upper()
 
-    # Track edit
+    # Track edit (only when updating existing record)
     if not created:
         attendance.is_edited = True
-        attendance.edit_reason = edit_reason
+        attendance.edit_reason = edit_reason.strip() or "Updated from Daily Attendance"
         attendance.edited_by = request.user
         attendance.edited_at = timezone.now()
         attendance.previous_status = previous_status
@@ -597,7 +625,7 @@ def mark_attendance(request):
 def bulk_mark_attendance(request):
     date_value = request.data.get("date")
     status_value = request.data.get("status")
-    edit_reason = request.data.get("edit_reason")  # Required
+    edit_reason = request.data.get("edit_reason") or "Bulk applied from Daily Attendance"
 
     if not date_value or not status_value:
         return Response(
@@ -605,13 +633,7 @@ def bulk_mark_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    if not edit_reason:
-        return Response(
-            {"error": "edit_reason is required"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    valid_statuses = dict(Attendance.STATUS_CHOICES).keys()
+    valid_statuses = [choice[0] for choice in ATTENDANCE_STATUS_CHOICES]
 
     if status_value.upper() not in valid_statuses:
         return Response(
@@ -632,23 +654,43 @@ def bulk_mark_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    company = get_current_company(request)
+    
+    # ============================
+    # HOLIDAY CHECK
+    # ============================
+    from apps.attendance.utils import is_holiday
+    is_hol, hol_obj = is_holiday(parsed_date, company=company)
+    
+    if is_hol and status_value.upper() == "ABSENT":
+        return Response(
+            {"error": f"Cannot bulk mark absent on a holiday ({hol_obj.holiday_name})"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    company = get_current_company(request)
     employees = Employee.objects.filter(is_active=True)
+    if company is not None:
+        employees = employees.filter(user__company=company)
 
     updated_count = 0
     created_count = 0
 
     for emp in employees:
+        defaults = {"status": status_value.upper()}
+        if getattr(emp, "company_id", None):
+            defaults["company_id"] = emp.company_id
         attendance, created = Attendance.objects.get_or_create(
             employee=emp,
             date=parsed_date,
-            defaults={"status": status_value.upper()}
+            defaults=defaults
         )
 
         if not created:
             attendance.previous_status = attendance.status
             attendance.status = status_value.upper()
             attendance.is_edited = True
-            attendance.edit_reason = edit_reason
+            attendance.edit_reason = (edit_reason or "Bulk applied from Daily Attendance").strip()
             attendance.edited_by = request.user
             attendance.edited_at = timezone.now()
             attendance.save()
@@ -810,7 +852,7 @@ def generate_today_attendance(request):
                 continue
 
             # 1️⃣ Holiday
-            if Holiday.objects.filter(date=today).exists():
+            if Holiday.objects.filter(from_date__lte=today, to_date__gte=today, is_active=True).exists():
                 Attendance.objects.create(
                     employee=employee,
                     date=today,
@@ -918,3 +960,98 @@ def edited_attendance_history(request):
         })
 
     return Response(data, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+@permission_classes([IsHR])
+def dashboard_summary(request):
+    from datetime import timedelta
+    from django.utils import timezone
+    from django.db.models import Count, Q
+    from apps.employees.models import Employee
+    from apps.attendance.models import Attendance
+    
+    today = timezone.localdate()
+    
+    # Total active employees
+    total_employees = Employee.objects.filter(user__is_active=True).count()
+    
+    # Today's attendance
+    today_attendance = Attendance.objects.filter(date=today)
+    
+    present_today = today_attendance.filter(status="PRESENT").count()
+    absent_today = today_attendance.filter(status="ABSENT").count()
+    late_today = today_attendance.filter(is_late=True).count()
+    wfh_today = today_attendance.filter(attendance_type="WFH").count()
+    
+    attendance_percentage = 0
+    if total_employees > 0:
+        attendance_percentage = round((present_today / total_employees) * 100, 1)
+
+    # Weekly trend
+    last_7_days = [today - timedelta(days=i) for i in range(6, -1, -1)]
+    trend_data = []
+    
+    weekly_attendance = Attendance.objects.filter(
+        date__in=last_7_days
+    ).values('date').annotate(
+        present=Count('id', filter=Q(status='PRESENT')),
+        absent=Count('id', filter=Q(status='ABSENT'))
+    )
+    
+    trend_dict = {item['date'].strftime('%Y-%m-%d'): item for item in weekly_attendance}
+    
+    for d in last_7_days:
+        date_str = d.strftime('%Y-%m-%d')
+        data = trend_dict.get(date_str, {'present': 0, 'absent': 0})
+        trend_data.append({
+            "name": d.strftime('%a'), # Short day name like Mon, Tue
+            "date": date_str,
+            "present": data['present'],
+            "absent": data['absent']
+        })
+
+    return Response({
+        "present_today": present_today,
+        "absent_today": absent_today,
+        "late_today": late_today,
+        "wfh_today": wfh_today,
+        "attendance_percentage": attendance_percentage,
+        "total_employees": total_employees,
+        "weekly_trend": trend_data
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsHR | IsEmployee])
+def attendance_day_status(request):
+    """
+    Returns holiday and week off status for a given date.
+    """
+    from datetime import datetime
+    date_str = request.query_params.get("date")
+    if not date_str:
+        return Response({"error": "date parameter required (YYYY-MM-DD)"}, status=status.HTTP_400_BAD_REQUEST)
+        
+    try:
+        parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return Response({"error": "Invalid date format"}, status=status.HTTP_400_BAD_REQUEST)
+        
+    from apps.attendance.utils import is_holiday, is_week_off
+    # Assume get_current_company exists or is imported
+    company = get_current_company(request)
+    
+    is_hol, hol_obj = is_holiday(parsed_date, company=company)
+    
+    # We check week off for the current user's employee profile if they are an employee
+    is_wo = False
+    if hasattr(request.user, "employee_profile"):
+        is_wo = is_week_off(parsed_date, request.user.employee_profile)
+        
+    return Response({
+        "is_holiday": bool(is_hol),
+        "holiday_name": hol_obj.holiday_name if hol_obj else None,
+        "holiday_type": hol_obj.holiday_type if hol_obj else None,
+        "is_week_off": is_wo
+    })

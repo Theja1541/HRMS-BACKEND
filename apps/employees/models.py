@@ -169,15 +169,9 @@ class Employee(models.Model):
     blank=True
 )
 
-    shift = models.ForeignKey(
-    "attendance.Shift",
-    on_delete=models.SET_NULL,
-    null=True,
-    blank=True
-)
 
     is_work_from_home = models.BooleanField(default=False)
-
+    history = models.JSONField(default=list, blank=True)
     # ============================================================
     # TIMESTAMPS
     # ============================================================
@@ -191,6 +185,10 @@ class Employee(models.Model):
 
     def __str__(self):
         return f"{self.employee_id} - {self.first_name} {self.last_name}"
+
+    @property
+    def full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
 
     # ============================================================
     # META
@@ -208,50 +206,45 @@ class Employee(models.Model):
 # EMPLOYEE HISTORY TRACKING
 # ============================================================
 
-class EmployeeHistory(models.Model):
-
-    employee = models.ForeignKey(
-        Employee,
-        on_delete=models.CASCADE,
-        related_name="history"
-    )
-
-    changed_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True
-    )
-
-    field_name = models.CharField(max_length=100)
-    old_value = models.TextField(null=True, blank=True)
-    new_value = models.TextField(null=True, blank=True)
-
-    changed_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-changed_at"]
-
-    def __str__(self):
-        return f"{self.employee.employee_id} - {self.field_name} changed"
+# NOTE: EmployeeHistory model removed – migrated to Employee.history JSONField.
 
 
+
+# NOTE: CustomRole model removed – role definitions now stored in JSONField `custom_roles`.
+
+
+
+# NOTE: CustomDepartment model removed – department definitions now stored in JSONField `departments`.
+
+# Placeholder models for compatibility with legacy code
 class CustomRole(models.Model):
-    name = models.CharField(max_length=100, unique=True)
+    """Simple role model retained for compatibility; stores role name per company."""
+    name = models.CharField(max_length=100)
+    company = models.ForeignKey(
+        "accounts.Company",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="custom_roles",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ['name']
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return self.name
-
+        return f"{self.name} ({self.company.name if self.company else 'Global'})"
 
 class CustomDepartment(models.Model):
-    name = models.CharField(max_length=100, unique=True)
+    """Simple department model retained for compatibility; stores department name per company."""
+    name = models.CharField(max_length=100)
+    company = models.ForeignKey(
+        "accounts.Company",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="custom_departments",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ['name']
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return self.name
+        return f"{self.name} ({self.company.name if self.company else 'Global'})"

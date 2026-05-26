@@ -213,20 +213,7 @@ class Holiday(models.Model):
 
 class Attendance(models.Model):
 
-    STATUS_CHOICES = (
-        ("PRESENT", "Present"),
-        ("HALF_DAY", "Half Day"),
-        ("PAID_LEAVE", "Paid Leave"),
-        ("UNPAID_LEAVE", "Unpaid Leave"),
-        ("ABSENT", "Absent"),
-        ("HOLIDAY", "Holiday"),
-        ("WEEK_OFF", "Week Off"),
-    )
 
-    status = models.CharField(
-        max_length=20,
-        choices=STATUS_CHOICES
-    )
 
     employee = models.ForeignKey(
         "employees.Employee",
@@ -338,6 +325,30 @@ class Attendance(models.Model):
     def __str__(self):
         return f"{self.employee} - {self.date} - {self.status}"
 
+    @property
+    def working_hours(self):
+        return self.work_hours
+
+    @working_hours.setter
+    def working_hours(self, value):
+        self.work_hours = value
+
+    @property
+    def remarks(self):
+        return self.notes
+
+    @remarks.setter
+    def remarks(self, value):
+        self.notes = value
+
+    @property
+    def marked_by(self):
+        return self.edited_by
+
+    @marked_by.setter
+    def marked_by(self, value):
+        self.edited_by = value
+
 
 class WorkCalendar(models.Model):
     """
@@ -359,24 +370,6 @@ class WorkCalendar(models.Model):
     )
 
     is_active = models.BooleanField(default=True)
-
-    def __str__(self):
-        return self.name
-
-
-class Shift(models.Model):
-    """
-    Defines working shift timing.
-    """
-
-    name = models.CharField(max_length=100)
-
-    start_time = models.TimeField()
-    end_time = models.TimeField()
-
-    grace_minutes = models.IntegerField(default=15)
-
-    is_night_shift = models.BooleanField(default=False)
 
     def __str__(self):
         return self.name

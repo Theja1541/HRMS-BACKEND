@@ -1,9 +1,11 @@
 from django.urls import path
 from . import views
+from . import workflow_views
 from .views import (
     set_salary,
     ctc_yearly_breakdown,
     payroll_summary,
+    payroll_status,
     export_payroll_excel,
     export_payroll_pdf,
     download_payslip_pdf,
@@ -34,6 +36,7 @@ urlpatterns = [
     path("payslip/all/", views.all_payslips),
     path("payslip/pdf/<int:payslip_id>/", views.download_payslip_pdf),
     path("payslip/download-all/", views.download_all_payslips_zip),
+    path("payslip/<int:payslip_id>/email-logs/", views.payslip_email_logs),
 
     # Email
     path("payslip/email/single/", views.send_single_payslip_email),
@@ -41,7 +44,10 @@ urlpatterns = [
     path("email/dashboard/", views.email_dashboard),
 
     # Payroll
-    path("status/", views.payroll_status),
+    path("status/", payroll_status),
+    path("approve/", workflow_views.approve_payroll),
+    path("bank-export/", workflow_views.bank_export),
+    path("mark-paid/", workflow_views.mark_payslip_paid),
     path("reopen/", views.reopen_payroll_month),
     path("dashboard-summary/", views.payroll_dashboard_summary),
 
@@ -57,7 +63,7 @@ urlpatterns = [
     path("reports/form16/", views.generate_form16),
     path("reports/neft-file/", views.generate_neft_file),
     path("reports/neft/", views.generate_neft_file),
-    path("full-final/generate/", views.generate_full_final),
+
     path("salary/ctc-yearly/", views.ctc_yearly_breakdown),
     path("my-summary/", views.my_payroll_summary),
     path("my-salary/", views.my_salary_view),

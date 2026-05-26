@@ -369,7 +369,9 @@ class Salary(models.Model):
 
     additional_benefits = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     ctc = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    revision_history = models.JSONField(default=list, blank=True)
 
+    created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def calculate_totals(self):
@@ -494,6 +496,10 @@ class PayslipEmailLog(models.Model):
     payslip = models.ForeignKey(Payslip, on_delete=models.CASCADE)
     email = models.EmailField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    paid_date = models.DateTimeField(null=True, blank=True)
+    bank_reference = models.CharField(max_length=100, blank=True, null=True)
+    email_sent = models.BooleanField(default=False)
+    email_sent_at = models.DateTimeField(null=True, blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
     error_message = models.TextField(blank=True, null=True)
 
@@ -537,34 +543,6 @@ class ProfessionalTaxSlab(models.Model):
         return f"{self.state} - {self.min_salary} to {self.max_salary}"
     
 
-class FullFinalSettlement(models.Model):
-
-    STATUS_CHOICES = (
-        ("NOT PAID", "Not Paid"),
-        ("APPROVED", "Approved"),
-        ("PAID", "Paid"),
-    )
-
-    employee = models.ForeignKey("employees.Employee", on_delete=models.CASCADE)
-
-    last_working_date = models.DateField()
-
-    salary_earned = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    leave_encashment = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    bonus = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-
-    notice_recovery = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    loan_recovery = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    tds_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-
-    final_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="NOT PAID")
-
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"{self.employee} - Full & Final"
     
 
 class SalaryRevision(models.Model):

@@ -1,6 +1,10 @@
 from django.db import models
 from django.conf import settings
 
+class ActiveManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(is_deleted=False)
+
 class Vendor(models.Model):
     VENDOR_TYPE_CHOICES = (
         ("SUPPLIER", "Supplier"),
@@ -29,8 +33,13 @@ class Vendor(models.Model):
     upi_id = models.CharField(max_length=100, blank=True, null=True)
     
     is_active = models.BooleanField(default=True)
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = ActiveManager()
+    all_objects = models.Manager()
 
     class Meta:
         ordering = ['name']
@@ -72,6 +81,7 @@ class Transaction(models.Model):
         ("CHEQUE", "Cheque"),
     )
 
+    transaction_number = models.CharField(max_length=50, unique=True, blank=True, null=True)
     date = models.DateField(db_index=True)
     details = models.TextField()
     category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name="transactions")
@@ -95,9 +105,15 @@ class Transaction(models.Model):
     upi_id = models.CharField(max_length=100, blank=True, null=True)
     cheque_number = models.CharField(max_length=50, blank=True, null=True)
     
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = ActiveManager()
+    all_objects = models.Manager()
 
     class Meta:
         ordering = ['-date', '-created_at']
@@ -106,6 +122,15 @@ class Transaction(models.Model):
             models.Index(fields=['category']),
             models.Index(fields=['payment_mode']),
             models.Index(fields=['-date']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    (models.Q(debit_amount__gt=0) & (models.Q(credit_amount=0) | models.Q(credit_amount__isnull=True))) |
+                    (models.Q(credit_amount__gt=0) & (models.Q(debit_amount=0) | models.Q(debit_amount__isnull=True)))
+                ),
+                name='daybook_transaction_amount_check'
+            )
         ]
 
     def __str__(self):

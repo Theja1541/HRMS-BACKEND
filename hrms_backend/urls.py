@@ -17,9 +17,9 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse   # ✅ FIX
-from rest_framework_simplejwt.views import TokenRefreshView
 from django.conf import settings
 from django.conf.urls.static import static
+from apps.accounts.views import custom_token_refresh, login_view, logout_view
 
 
 def home(request):
@@ -46,7 +46,11 @@ urlpatterns = [
     path('api/test/', api_test),
     path('api/health/', health_check),
 
+    path("api/billing/", include("apps.billing.urls")),
     path('api/accounts/', include('apps.accounts.urls')),
+    path("api/auth/login/", login_view),
+    path("api/auth/logout/", logout_view),
+    path("api/auth/token/refresh/", custom_token_refresh),
     path('api/employees/', include('apps.employees.urls')),
     path('api/attendance/', include('apps.attendance.urls')),
     path('api/leaves/', include('apps.leaves.urls')),
@@ -55,8 +59,11 @@ urlpatterns = [
     path('api/notifications/', include('apps.notifications.urls')),
     path('api/payroll/', include('apps.payroll.urls')),
     path('api/assets/', include('apps.assets.urls')),
+    path("api/support/", include("apps.support.urls")),
+    path("api/holidays/", include("apps.holidays.urls")),
+    path("api/superadmin/", include("apps.superadmin.urls")),
 
-    path("api/accounts/token/refresh/", TokenRefreshView.as_view()),
+    path("api/accounts/token/refresh/", custom_token_refresh),
 ]
 
 
