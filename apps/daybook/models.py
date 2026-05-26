@@ -95,7 +95,11 @@ class Transaction(models.Model):
     to_vendor = models.ForeignKey(Vendor, on_delete=models.PROTECT, related_name="transactions_to", null=True, blank=True)
     
     gst_applicable = models.BooleanField(default=False)
+    gst_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, default=0)
     gst_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True, default=0)
+    
+    # HSN Code
+    hsn_code = models.CharField(max_length=50, blank=True, null=True)
     
     # Payment mode specific fields
     bank_name = models.CharField(max_length=100, blank=True, null=True)

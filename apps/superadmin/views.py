@@ -470,39 +470,39 @@ def reports_overview(request):
 @api_view(["GET"])
 @permission_classes([IsSuperAdmin])
 def monthly_growth_analytics(request):
-    users = (
+    users = list(
         User.objects
-        .annotate(month=TruncMonth("date_joined"))
-        .values("month")
+        .annotate(period=TruncMonth("date_joined"))
+        .values("period")
         .annotate(count=Count("id"))
-        .order_by("month")
+        .order_by("period")
     )
-    employees = (
+    employees = list(
         Employee.objects
-        .annotate(month=TruncMonth("created_at"))
-        .values("month")
+        .annotate(period=TruncMonth("created_at"))
+        .values("period")
         .annotate(count=Count("id"))
-        .order_by("month")
+        .order_by("period")
     )
-    leaves = (
+    leaves = list(
         LeaveRequest.objects
-        .annotate(month=TruncMonth("applied_on"))
-        .values("month")
+        .annotate(period=TruncMonth("applied_on"))
+        .values("period")
         .annotate(count=Count("id"))
-        .order_by("month")
+        .order_by("period")
     )
-    payslips = (
+    payslips = list(
         Payslip.objects
-        .annotate(month=TruncMonth("month"))
-        .values("month")
+        .annotate(period=TruncMonth("month"))
+        .values("period")
         .annotate(count=Count("id"))
-        .order_by("month")
+        .order_by("period")
     )
     return Response({
-        "users": list(users),
-        "employees": list(employees),
-        "leaves": list(leaves),
-        "payslips": list(payslips),
+        "users": [{"month": x["period"], "count": x["count"]} for x in users],
+        "employees": [{"month": x["period"], "count": x["count"]} for x in employees],
+        "leaves": [{"month": x["period"], "count": x["count"]} for x in leaves],
+        "payslips": [{"month": x["period"], "count": x["count"]} for x in payslips],
     })
 
 
