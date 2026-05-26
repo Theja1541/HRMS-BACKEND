@@ -7,11 +7,14 @@ def company_logo_upload_to(instance, filename):
     return f"company_logos/company_{instance.id}/{filename}"
 
 class User(AbstractUser):
+    # Link user to a tenant company
+    company = models.ForeignKey('Company', on_delete=models.SET_NULL, null=True, blank=True, related_name='users')
 
     ROLE_CHOICES = (
         ("SUPER_ADMIN", "Super Admin"),
         ("ADMIN", "Admin"),
         ("HR", "HR"),
+        ("FINANCE_ADMIN", "Finance Admin"),
         ("EMPLOYEE", "Employee"),
     )
 
@@ -50,15 +53,28 @@ class User(AbstractUser):
     # from teja
 
 
+def default_enabled_modules():
+    return {
+        "attendance": True,
+        "leave": True,
+        "payroll": True,
+        "assets": True,
+        "support": True,
+        "notifications": True,
+        "billing": True,
+        "daybook": True,
+        "holidays": True,
+    }
+
 class Company(models.Model):
     """Multi-tenant company entity storing core configuration and branding."""
-
-
-
+    
+    enabled_modules = models.JSONField(default=default_enabled_modules, blank=True)
     # name = models.CharField(max_length=255, unique=True)
     name = models.CharField(max_length=255)
     company_code = models.CharField(max_length=50, unique=True, help_text="Unique code or short identifier for the company")
     domain = models.CharField(max_length=255, blank=True, null=True, help_text="Custom domain or subdomain for white-labeling")
+    logo = models.ImageField(upload_to="company_logos/", null=True, blank=True)
     
 
     is_active = models.BooleanField(default=True, db_index=True)

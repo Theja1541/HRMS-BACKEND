@@ -63,7 +63,7 @@ urlpatterns = [
     path("reports/form16/", views.generate_form16),
     path("reports/neft-file/", views.generate_neft_file),
     path("reports/neft/", views.generate_neft_file),
-    path("full-final/generate/", views.generate_full_final),
+
     path("salary/ctc-yearly/", views.ctc_yearly_breakdown),
     path("my-summary/", views.my_payroll_summary),
     path("my-salary/", views.my_salary_view),

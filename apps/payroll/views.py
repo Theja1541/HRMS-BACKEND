@@ -728,7 +728,7 @@ from django.db import transaction
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
-from .models import FullFinalSettlement
+
 from apps.accounts.permissions import IsHR
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -846,7 +846,7 @@ def set_salary(request):
         return Response({"error": "employee_id required"}, status=400)
 
     qs = Employee.objects.filter(id=employee_id)
-    if company is not None:
+    if company is not None and hasattr(qs.model, 'company'):
         qs = qs.filter(company=company)
     try:
         employee = qs.get()
@@ -883,7 +883,7 @@ def set_salary(request):
 def all_salaries(request):
     company = get_current_company(request)
     qs = Salary.objects.select_related("employee")
-    if company is not None:
+    if company is not None and hasattr(qs.model, 'company'):
         qs = qs.filter(company=company)
     return Response(SalarySerializer(qs, many=True).data)
 
@@ -893,7 +893,7 @@ def all_salaries(request):
 def update_salary(request, salary_id):
     company = get_current_company(request)
     qs = Salary.objects.filter(id=salary_id)
-    if company is not None:
+    if company is not None and hasattr(qs.model, 'company'):
         qs = qs.filter(company=company)
     try:
         salary = qs.get()
@@ -916,7 +916,7 @@ def update_salary(request, salary_id):
 def get_salary_by_employee(request, employee_id):
     company = get_current_company(request)
     qs = Salary.objects.filter(employee__id=employee_id)
-    if company is not None:
+    if company is not None and hasattr(qs.model, 'company'):
         qs = qs.filter(company=company)
     try:
         salary = qs.get()
@@ -984,17 +984,19 @@ def generate_payslip(request):
         return Response({"error": "Invalid month format (YYYY-MM)"}, status=400)
 
     defaults_pm = {"status": "OPEN"}
-    if company:
+    pm_kwargs = {"year": year, "month": month}
+    if company and hasattr(PayrollMonth, "company"):
         defaults_pm["company"] = company
+        pm_kwargs["company"] = company
     payroll_month, created = PayrollMonth.objects.get_or_create(
-        company=company, year=year, month=month, defaults=defaults_pm
+        defaults=defaults_pm, **pm_kwargs
     )
     if payroll_month.status == "CLOSED":
         payroll_month.status = "OPEN"
         payroll_month.save(update_fields=["status"])
 
     qs = Employee.objects.select_related("salary").filter(id=employee_id)
-    if company is not None:
+    if company is not None and hasattr(qs.model, 'company'):
         qs = qs.filter(company=company)
     try:
         employee = qs.get()
@@ -1120,14 +1122,16 @@ def bulk_generate_payslips(request):
 
     company = get_current_company(request)
     pm_defaults = {"status": "OPEN"}
-    if company:
+    pm_kwargs = {"year": month_date.year, "month": month_date.month}
+    if company and hasattr(PayrollMonth, "company"):
         pm_defaults["company"] = company
+        pm_kwargs["company"] = company
     PayrollMonth.objects.get_or_create(
-        company=company, year=month_date.year, month=month_date.month, defaults=pm_defaults
+        defaults=pm_defaults, **pm_kwargs
     )
 
     employees = Employee.objects.filter(is_active=True)
-    if company is not None:
+    if company is not None and hasattr(employees.model, 'company'):
         employees = employees.filter(company=company)
     generated = 0
 
@@ -1195,7 +1199,7 @@ def bulk_generate_payslips(request):
 def approve_payslip(request, payslip_id):
     company = get_current_company(request)
     qs = Payslip.objects.select_related("employee").filter(id=payslip_id)
-    if company is not None:
+    if company is not None and hasattr(qs.model, 'company'):
         qs = qs.filter(company=company)
     try:
         payslip = qs.get()
@@ -1225,15 +1229,13 @@ def approve_payslip(request, payslip_id):
 def mark_payslip_paid(request, payslip_id):
     company = get_current_company(request)
     qs = Payslip.objects.filter(id=payslip_id)
-    if company is not None:
+    if company is not None and hasattr(qs.model, 'company'):
         qs = qs.filter(company=company)
     now = timezone.now()
     bank_reference = request.data.get("bank_reference")
     qs.update(
         status="PAID",
         paid_on=now,
-        paid_date=now,
-        bank_reference=bank_reference if bank_reference else None,
     )
     return Response({"message": "Payslip marked as PAID"})
 
@@ -1243,7 +1245,7 @@ def mark_payslip_paid(request, payslip_id):
 def cancel_payslip(request, payslip_id):
     company = get_current_company(request)
     qs = Payslip.objects.filter(id=payslip_id)
-    if company is not None:
+    if company is not None and hasattr(qs.model, 'company'):
         qs = qs.filter(company=company)
     qs.update(status="CANCELLED")
     return Response({"message": "Payslip cancelled"})
@@ -2418,94 +2420,6 @@ def generate_neft_file(request):
 
 
 
-@api_view(["POST"])
-@permission_classes([IsHR])
-@transaction.atomic
-def generate_full_final(request):
-
-    employee_id = request.data.get("employee_id")
-    last_working_date = request.data.get("last_working_date")
-    notice_recovery = Decimal(request.data.get("notice_recovery", 0))
-    loan_recovery = Decimal(request.data.get("loan_recovery", 0))
-    bonus = Decimal(request.data.get("bonus", 0))
-
-    if not employee_id or not last_working_date:
-        return Response({"error": "employee_id and last_working_date required"}, status=400)
-
-    try:
-        employee = Employee.objects.select_related("salary").get(id=employee_id)
-    except Employee.DoesNotExist:
-        return Response({"error": "Employee not found"}, status=404)
-
-    try:
-        last_date = datetime.strptime(last_working_date, "%Y-%m-%d").date()
-    except:
-        return Response({"error": "Invalid date format YYYY-MM-DD"}, status=400)
-
-    # salary = employee.salary
-    salary = get_current_salary(employee)
-
-    # Calculate gross monthly safely
-    if salary:
-        gross_monthly = (
-            (getattr(salary, 'basic', 0) or 0) +
-            (getattr(salary, 'da', 0) or 0) +
-            (getattr(salary, 'hra', 0) or 0) +
-            (getattr(salary, 'conveyance', 0) or 0) +
-            (getattr(salary, 'medical', 0) or 0) +
-            (getattr(salary, 'special_allowance', 0) or 0)
-        )
-    else:
-        gross_monthly = Decimal("0.00")
-
-    total_days = monthrange(last_date.year, last_date.month)[1]
-    worked_days = last_date.day
-
-    # Salary earned till LWD
-    per_day_salary = gross_monthly / Decimal(total_days)
-    salary_earned = per_day_salary * Decimal(worked_days)
-
-    # Leave Encashment (EL only)
-    leave_encash_days, leave_encash_amount = calculate_leave_encashment(
-        employee,
-        last_date.year,
-        last_date.month,
-        gross_monthly
-    )
-
-    # Simple TDS on final payout (projected)
-    tds_amount = salary_earned * Decimal("0.10")  # simplified final TDS logic
-
-    total_earnings = salary_earned + leave_encash_amount + bonus
-    total_deductions = notice_recovery + loan_recovery + tds_amount
-
-    final_amount = total_earnings - total_deductions
-
-    if final_amount < 0:
-        final_amount = Decimal("0.00")
-
-    settlement = FullFinalSettlement.objects.create(
-        employee=employee,
-        last_working_date=last_date,
-        salary_earned=salary_earned,
-        leave_encashment=leave_encash_amount,
-        bonus=bonus,
-        notice_recovery=notice_recovery,
-        loan_recovery=loan_recovery,
-        tds_amount=tds_amount,
-        final_amount=final_amount,
-        status="NOT PAID"
-    )
-
-    return Response({
-        "message": "Full & Final settlement generated",
-        "salary_earned": salary_earned,
-        "leave_encashment": leave_encash_amount,
-        "tds_amount": tds_amount,
-        "final_amount": final_amount
-    }, status=201)
-
-
 @api_view(["GET"])
 @permission_classes([IsHR])
 def ctc_yearly_breakdown(request):
@@ -2703,7 +2617,7 @@ def payroll_summary(request):
             payslips = payslips.filter(company_id=company_id)
     else:
         company = get_current_company(request)
-        if company:
+        if company and hasattr(payslips.model, 'company'):
             payslips = payslips.filter(company=company)
 
     if year and month:

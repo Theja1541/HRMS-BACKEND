@@ -203,32 +203,4 @@ class LeaveApprovalLog(models.Model):
         return f"{self.leave_request.id} - {self.action}"
     
 
-
-class LeaveAccrualLog(models.Model):
-    employee = models.ForeignKey("employees.Employee", on_delete=models.CASCADE)
-    leave_type = models.ForeignKey("leaves.LeaveType", on_delete=models.CASCADE)
-    year = models.IntegerField()
-    month = models.IntegerField()
-    credited_days = models.DecimalField(max_digits=5, decimal_places=2)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = ("employee", "leave_type", "year", "month")
-
-    def __str__(self):
-        return f"{self.employee} - {self.leave_type.name} - {self.month}/{self.year}"
-
-
-class Holiday(models.Model):
-
-    name = models.CharField(max_length=100)
-
-    date = models.DateField()
-
-    description = models.TextField(blank=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"{self.name} - {self.date}"
+

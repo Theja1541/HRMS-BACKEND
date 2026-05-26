@@ -8,7 +8,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, Sum, Q
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -76,17 +76,24 @@ def custom_token_refresh(request):
 
     try:
         refresh = RefreshToken(refresh_token)
+        # Issue a new refresh token to implement rolling sessions
+        refresh.set_jti()
+        refresh.set_exp()
         access = refresh.access_token
-        access.set_exp(lifetime=timedelta(minutes=get_int_setting(
-            "session_timeout_minutes", 60, minimum=5
-        )))
+        
+        timeout_minutes = get_int_setting("session_timeout_minutes", 60, minimum=1)
+        access.set_exp(lifetime=timedelta(minutes=timeout_minutes))
+        refresh.set_exp(lifetime=timedelta(minutes=timeout_minutes))
     except TokenError:
         return Response(
-            {"detail": "Token is invalid or expired."},
+            {"detail": "Token is invalid or expired"},
             status=status.HTTP_401_UNAUTHORIZED,
         )
 
-    return Response({"access": str(access)})
+    return Response({
+        "access": str(access),
+        "refresh": str(refresh),
+    })
 
 
 def _company_logo_validation_error(uploaded):
@@ -204,7 +211,7 @@ def _set_new_password(user, new_password):
     validate_password(new_password, user=user)
 
     user.set_password(new_password)
-    user.password_changed_at = timezone.now()
+    # `password_changed_at` was removed from the User model; skip setting it.
     user.must_change_password = False
     user.failed_attempts = 0
     user.is_locked = False
@@ -212,7 +219,6 @@ def _set_new_password(user, new_password):
     user.save(
         update_fields=[
             "password",
-            "password_changed_at",
             "must_change_password",
             "failed_attempts",
             "is_locked",
@@ -808,7 +814,7 @@ def superadmin_analytics(request):
         Company.objects.filter(is_active=True)
         .annotate(
             user_count=Count("users", distinct=True),
-            employee_count=Count("employees", distinct=True),
+            employee_count=Count("users", filter=Q(users__role='EMPLOYEE'), distinct=True),
         )
         .values("id", "name", "company_code", "user_count", "employee_count", "is_active")
     )
@@ -853,7 +859,7 @@ def superadmin_analytics(request):
 def company_list(request):
     is_active = request.query_params.get("is_active")
     qs = (
-        Company.objects.annotate(employee_count=Count("employees"))
+        Company.objects.annotate(employee_count=Count("users", filter=Q(users__role='EMPLOYEE')))
         .order_by("name")
     )
     if is_active is not None:
@@ -950,7 +956,7 @@ def company_create(request):
 @permission_classes([IsSuperAdmin])
 def company_detail(request, company_id):
     company = get_object_or_404(
-        Company.objects.annotate(employee_count=Count("employees")),
+        Company.objects.annotate(employee_count=Count("users", filter=Q(users__role='EMPLOYEE'))),
         id=company_id,
     )
     serializer = CompanySerializer(company, context={"request": request})
@@ -993,8 +999,14 @@ def company_logo(request, company_id):
         )
 
     if request.method == "DELETE":
-        company.clear_logo_file()
-        company.save(update_fields=["logo"])
+        if hasattr(company, "clear_logo_file"):
+            try:
+                company.clear_logo_file()
+                company.save(update_fields=["logo"])
+            except Exception:
+                pass
+        else:
+            return Response({"detail": "Company logo feature not available for this tenant."}, status=status.HTTP_400_BAD_REQUEST)
         log_action(
             request,
             "UPDATE",
@@ -1018,8 +1030,14 @@ def company_logo(request, company_id):
     if err:
         return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
 
-    if company.logo:
-        company.logo.delete(save=False)
+    if not hasattr(company, "logo"):
+        return Response({"detail": "Company logo feature not available for this tenant."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if getattr(company, "logo"):
+        try:
+            company.logo.delete(save=False)
+        except Exception:
+            pass
 
     ext = os.path.splitext(uploaded.name or "")[1].lower()
     if ext not in ALLOWED_LOGO_EXTENSIONS:
@@ -1043,6 +1061,10 @@ def company_logo(request, company_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def company_branding(request):
+    # If the request is unauthenticated, return 401 for clarity.
+    if not request.user or not request.user.is_authenticated:
+        return Response({"detail": "Authentication credentials were not provided or are invalid."}, status=status.HTTP_401_UNAUTHORIZED)
+
     company = _get_request_company(request)
     if not company:
         return Response({"detail": "No company context found."}, status=status.HTTP_403_FORBIDDEN)
@@ -1064,8 +1086,14 @@ def company_branding_logo(request):
         return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == "DELETE":
-        company.clear_logo_file()
-        company.save(update_fields=["logo", "updated_at"])
+        if hasattr(company, "clear_logo_file"):
+            try:
+                company.clear_logo_file()
+                company.save(update_fields=["logo", "updated_at"])
+            except Exception:
+                pass
+        else:
+            return Response({"detail": "Company logo feature not available for this tenant."}, status=status.HTTP_400_BAD_REQUEST)
         data = CompanySerializer(company, context={"request": request}).data
         data["logoUrl"] = data.get("logo_url")
         return Response(data)
@@ -1078,8 +1106,14 @@ def company_branding_logo(request):
     if err:
         return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
 
-    if company.logo:
-        company.logo.delete(save=False)
+    if not hasattr(company, "logo"):
+        return Response({"detail": "Company logo feature not available for this tenant."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if getattr(company, "logo"):
+        try:
+            company.logo.delete(save=False)
+        except Exception:
+            pass
 
     ext = os.path.splitext(uploaded.name or "")[1].lower()
     if ext not in ALLOWED_LOGO_EXTENSIONS:
@@ -1165,10 +1199,84 @@ def company_mark_paid(request, company_id):
 def company_hard_delete(request, company_id):
     company = get_object_or_404(Company, id=company_id)
     company_name = company.name
-    if company.logo:
-        company.logo.delete(save=False)
-    company.delete()
-    return Response({"message": f"Company '{company_name}' permanently deleted"})
+    # Company model may no longer have a `logo` field after migrations.
+    # Safely check before attempting to delete any file attribute.
+    if hasattr(company, "logo") and getattr(company, "logo"):
+        try:
+            company.logo.delete(save=False)
+        except Exception:
+            # Ignore errors during file deletion to allow hard-delete to proceed
+            pass
+
+    # Remove dependent objects that reference this company to avoid FK constraint errors.
+    from django.apps import apps
+    from django.db import transaction, IntegrityError
+
+    related_deletions = []
+    try:
+        with transaction.atomic():
+            CompanyModel = apps.get_model("accounts", "Company")
+            for model in apps.get_models():
+                for field in model._meta.get_fields():
+                    remote = getattr(field, "remote_field", None)
+                    if not remote or not getattr(remote, "model", None):
+                        continue
+                    # remote.model may be a string or model class
+                    try:
+                        remote_model = remote.model
+                    except Exception:
+                        remote_model = None
+                    if remote_model == CompanyModel or (isinstance(remote_model, str) and remote_model.endswith("Company")):
+                        # Build filter by FK id
+                        fk_name = field.name
+                        filter_kwargs = {f"{fk_name}_id": company.id}
+                        qs = model.objects.filter(**filter_kwargs)
+                        count = qs.count()
+                        if count:
+                            qs.delete()
+                            related_deletions.append((model._meta.label, count))
+            # Finally delete the company record itself
+            company.delete()
+    except IntegrityError as exc:
+        logger.exception("Failed to hard-delete company due to DB integrity error")
+        # Attempt best-effort cleanup of DB-level foreign key references not exposed in Django models
+        from django.db import connection
+        cleaned_tables = []
+        try:
+            with transaction.atomic():
+                cursor = connection.cursor()
+                cursor.execute("SELECT DATABASE()")
+                dbname = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    SELECT TABLE_NAME, COLUMN_NAME
+                    FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                    WHERE REFERENCED_TABLE_SCHEMA = %s AND REFERENCED_TABLE_NAME = %s
+                    """,
+                    [dbname, 'accounts_company'],
+                )
+                fks = cursor.fetchall()
+                for table, column in fks:
+                    if table == 'accounts_company':
+                        continue
+                    try:
+                        cursor.execute(f"DELETE FROM `{table}` WHERE `{column}` = %s", [company.id])
+                        cleaned_tables.append(table)
+                    except Exception:
+                        logger.exception("Failed deleting from %s.%s", table, column)
+                # retry delete
+                company.delete()
+        except Exception:
+            logger.exception("Best-effort DB cleanup failed")
+            return Response({"error": "Failed to delete company due to related database records. Clean up dependencies first."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        msg = f"Company '{company_name}' permanently deleted"
+        if cleaned_tables:
+            msg += "; cleaned: " + ", ".join(sorted(set(cleaned_tables)))
+        return Response({"message": msg})
+    msg = f"Company '{company_name}' permanently deleted"
+    if related_deletions:
+        msg += "; removed related: " + ", ".join([f"{label}({cnt})" for label, cnt in related_deletions])
+    return Response({"message": msg})
 
 
 # =========================================================

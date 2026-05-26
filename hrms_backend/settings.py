@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'apps.daybook.apps.DaybookConfig',
     'apps.audit',
     'apps.assets.apps.AssetsConfig',
+    'apps.holidays.apps.HolidaysConfig',
     'rest_framework_simplejwt.token_blacklist',
     # "django_celery_beat",
     # "channels",
@@ -199,11 +200,6 @@ CACHES = {
 
 RATELIMIT_USE_CACHE = "default"
 
-# EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-EMAIL_BACKEND = os.getenv(
-    "EMAIL_BACKEND",
-    "django.core.mail.backends.smtp.EmailBackend",
-)
 EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
 EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True") == "True"
@@ -216,6 +212,22 @@ DEFAULT_FROM_EMAIL = (
     or EMAIL_HOST_USER
     or "hr@gmmc.com"
 )
+
+# Choose email backend:
+# - If `EMAIL_BACKEND` env var is explicitly provided, use it.
+# - Else, in DEBUG prefer SMTP when SMTP credentials are configured so OTPs/email actually deliver during local testing.
+# - If DEBUG and no SMTP creds, fall back to console backend to avoid spam/errors.
+env_email_backend = os.getenv("EMAIL_BACKEND")
+if env_email_backend:
+    EMAIL_BACKEND = env_email_backend
+else:
+    if DEBUG:
+        if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
+            EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+        else:
+            EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+    else:
+        EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
 TEMP_PASSWORD_EXPIRY_HOURS = int(os.getenv("TEMP_PASSWORD_EXPIRY_HOURS", "24"))
 

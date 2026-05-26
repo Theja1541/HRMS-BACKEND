@@ -283,12 +283,12 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
             # Tenant isolation: restrict to current company (SuperAdmin with no company sees all)
             base = Employee.objects.all()
             if company is not None:
-                base = base.filter(company=company)
+                base = base.filter(user__company=company)
             # SuperAdmin can filter by company_id query param (e.g. for company detail page)
             if user.role == "SUPER_ADMIN":
                 company_id = self.request.query_params.get("company_id")
                 if company_id:
-                    base = base.filter(company_id=company_id)
+                    base = base.filter(user__company_id=company_id)
 
             if self.action == "activate":
                 base = base.filter(is_active=False)
@@ -300,7 +300,7 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
             if role_filter:
                 base = base.filter(designation__icontains=role_filter)
 
-        return base.select_related("user", "salary", "company")
+        return base.select_related("user", "salary")
     # =====================================================
     # SERIALIZER
     # =====================================================
@@ -338,8 +338,19 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
 
     def perform_create(self, serializer):
         company = get_current_company(self.request)
+        # Allow Super Admin to create employees for a specific company by passing `company_id`.
         if company is None and self.request.user.role != "SUPER_ADMIN":
             raise ValidationError("Cannot create employee: no company context.")
+        if company is None and self.request.user.role == "SUPER_ADMIN":
+            # Try to read company_id from request data (POST body or query params)
+            company_id = self.request.data.get("company_id") or self.request.query_params.get("company_id")
+            if company_id:
+                try:
+                    from apps.accounts.models import Company
+
+                    company = Company.objects.filter(id=company_id).first()
+                except Exception:
+                    company = None
 
         email = serializer.validated_data.get("email")
         requested_role = str(self.request.data.get("role", "EMPLOYEE")).upper().strip()
@@ -361,7 +372,7 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
             user.set_unusable_password()
             user.save(update_fields=["password"])
 
-            employee = serializer.save(user=user, company=company, is_active=True)
+            employee = serializer.save(user=user, is_active=True)
 
             log_action(
                 self.request, "CREATE", "Employee",
@@ -377,7 +388,10 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
                     recipient_name=employee.first_name,
                 )
             except TemporaryPasswordEmailError as exc:
-                raise ValidationError({"message": str(exc)}) from exc
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.exception("Failed to send temporary password email to user %s (%s)", user.id, user.email)
+                # Do not fail employee creation if email sending fails; continue and log the issue.
 
     # =====================================================
     # UPDATE EMPLOYEE (WITH HISTORY)
@@ -519,7 +533,7 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
 
         base_employees = Employee.objects.filter(is_active=True)
         if company is not None:
-            base_employees = base_employees.filter(company=company)
+            base_employees = base_employees.filter(user__company=company)
 
         if request.method == "GET":
             designations = base_employees.values_list("designation", flat=True).distinct()
@@ -571,7 +585,7 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
 
         base_employees = Employee.objects.filter(is_active=True)
         if company is not None:
-            base_employees = base_employees.filter(company=company)
+            base_employees = base_employees.filter(user__company=company)
 
         if request.method == "GET":
             departments = base_employees.values_list("department", flat=True).distinct()
@@ -778,6 +792,26 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
             purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
             recipient_name=employee.first_name,
         )
+
+
+
+    @action(detail=False, methods=["get"], url_path="department-distribution")
+    def department_distribution(self, request):
+        from django.db.models import Count
+        qs = self.get_queryset()
+        data = qs.values("department").annotate(count=Count("id")).order_by("-count")
+        
+        formatted_data = []
+        for item in data:
+            dept = item["department"]
+            if not dept:
+                dept = "Unassigned"
+            formatted_data.append({
+                "name": dept,
+                "value": item["count"]
+            })
+            
+        return Response(formatted_data)
 
 
 

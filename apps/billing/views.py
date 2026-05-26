@@ -73,10 +73,24 @@ def assign_plan_to_company(request, company_id):
             {"detail": "Pricing plan not found or inactive."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    company.pricing_plan = plan
+    # The Company model no longer stores a direct pricing_plan FK.
+    # Create a Payment record to represent the assignment and use it as the source
+    # of truth for which plan the company is on.
+    subscription_start = request.data.get("subscription_period_start")
+    payment_date = subscription_start or timezone.now().date()
+    # Create a completed payment record for this assignment
+    payment = Payment.objects.create(
+        company=company,
+        pricing_plan=plan,
+        amount=plan.price_monthly,
+        currency=plan.currency,
+        status=Payment.STATUS_COMPLETED,
+        payment_date=payment_date,
+        notes="Assigned plan via admin",
+    )
     if period_end:
         company.subscription_period_end = period_end
-    company.save(update_fields=["pricing_plan", "subscription_period_end"])
+        company.save(update_fields=["subscription_period_end"])
     from apps.accounts.serializers import CompanySerializer
     return Response(CompanySerializer(company).data)
 
@@ -174,17 +188,24 @@ def subscription_alerts(request):
             Q(subscription_period_end__lt=today)
             | Q(subscription_period_end__lte=threshold)
         )
-        .select_related("pricing_plan")
         .order_by("subscription_period_end")
     )
     alerts = []
     for c in qs:
         expired = c.subscription_period_end < today
+        # Derive plan name from latest completed payment that references a pricing_plan
+        latest_payment = (
+            Payment.objects.filter(company=c, pricing_plan__isnull=False, status=Payment.STATUS_COMPLETED)
+            .select_related("pricing_plan")
+            .order_by("-created_at")
+            .first()
+        )
+        plan_name = latest_payment.pricing_plan.name if latest_payment and latest_payment.pricing_plan else None
         alerts.append({
             "company_id": c.id,
             "company_name": c.name,
             "company_code": c.company_code,
-            "plan_name": c.pricing_plan.name if c.pricing_plan else None,
+            "plan_name": plan_name,
             "subscription_period_end": c.subscription_period_end.isoformat() if c.subscription_period_end else None,
             "expired": expired,
             "days_until_expiry": (c.subscription_period_end - today).days if c.subscription_period_end else None,

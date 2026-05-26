@@ -1,6 +1,5 @@
 from django.contrib import admin
 from .models import LeaveType, LeaveBalance, LeaveRequest, LeaveApprovalLog
-from .models import Holiday
 
 
 @admin.register(LeaveType)
@@ -25,6 +24,4 @@ class LeaveApprovalLogAdmin(admin.ModelAdmin):
 
 #hai frpm anilkumar
 
-@admin.register(Holiday)
-class HolidayAdmin(admin.ModelAdmin):
-    list_display = ("name","date")
+

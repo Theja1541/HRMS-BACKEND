@@ -145,7 +145,8 @@ def send_temporary_password_email(user, temp_password, purpose, recipient_name=N
 
 def save_temporary_password(user, temp_password, purpose, issued_by=None):
     user.set_password(temp_password)
-    user.password_changed_at = timezone.now()
+    # `password_changed_at` field was removed from the User model in recent migrations.
+    # Do not set or include it in update_fields to avoid ValueError on save().
     user.must_change_password = True
     user.failed_attempts = 0
     user.is_locked = False
@@ -153,7 +154,6 @@ def save_temporary_password(user, temp_password, purpose, issued_by=None):
     user.save(
         update_fields=[
             "password",
-            "password_changed_at",
             "must_change_password",
             "failed_attempts",
             "is_locked",

@@ -33,6 +33,7 @@ from .views import (
     forgot_password,
     logout_view,
 )
+from apps.superadmin.views import monthly_growth_analytics
 
 
 urlpatterns = [
@@ -68,6 +69,7 @@ urlpatterns = [
 
     path("profile/", employee_profile, name="employee-profile"),
     path("analytics/", superadmin_analytics, name="analytics"),
+    path("analytics/monthly-growth/", monthly_growth_analytics),
     path("change-password/", change_password, name="change-password"),
     path("change-password-with-old/", change_password_with_old, name="change-password-with-old"),
     path("forgot-password/", forgot_password, name="forgot-password"),

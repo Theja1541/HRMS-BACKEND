@@ -1,4 +1,5 @@
-from ..models import LeaveRequest, Holiday
+from ..models import LeaveRequest
+from apps.holidays.models import Holiday
 
 
 def get_calendar_events(request):
@@ -7,7 +8,7 @@ def get_calendar_events(request):
         status="APPROVED"
     ).select_related("employee","leave_type")
 
-    holidays = Holiday.objects.all()
+    holidays = Holiday.objects.filter(is_active=True)
 
     events = []
 
@@ -32,9 +33,9 @@ def get_calendar_events(request):
 
         events.append({
             "type": "holiday",
-            "title": holiday.name,
-            "start": holiday.date,
-            "end": holiday.date
+            "title": holiday.holiday_name,
+            "start": holiday.from_date,
+            "end": holiday.to_date
         })
 
     return events

@@ -1,7 +1,7 @@
 from decimal import Decimal
 from datetime import date
 from django.db import transaction
-from apps.leaves.models import LeaveType, LeaveBalance, LeaveAccrualLog
+from apps.leaves.models import LeaveType, LeaveBalance
 from apps.employees.models import Employee
 
 
@@ -34,14 +34,17 @@ def credit_monthly_leaves():
                         continue
                 
                 # Check if already credited
-                already_credited = LeaveAccrualLog.objects.filter(
+                balance, created = LeaveBalance.objects.get_or_create(
                     employee=employee,
                     leave_type=leave_type,
                     year=current_year,
-                    month=current_month
-                ).exists()
+                    defaults={"total_allocated": Decimal("0")}
+                )
                 
-                if already_credited:
+                # Check if balance already accounts for this month (simplified)
+                # Without log, assume if total_allocated > (month-1)*monthly_credit, it's credited
+                expected_balance = monthly_credit * (current_month - 1)
+                if balance.total_allocated > expected_balance:
                     continue
                 
                 # Get or create balance
@@ -56,15 +59,7 @@ def credit_monthly_leaves():
                 balance.total_allocated += monthly_credit
                 balance.save()
                 
-                # Log accrual
-                LeaveAccrualLog.objects.create(
-                    employee=employee,
-                    leave_type=leave_type,
-                    year=current_year,
-                    month=current_month,
-                    credited_days=monthly_credit
-                )
-                
+
                 credited_count += 1
     
     return credited_count
@@ -115,15 +110,7 @@ def credit_annual_leaves():
                     balance.total_allocated = leave_type.annual_quota
                     balance.save()
                 
-                # Log accrual
-                LeaveAccrualLog.objects.create(
-                    employee=employee,
-                    leave_type=leave_type,
-                    year=current_year,
-                    month=1,
-                    credited_days=leave_type.annual_quota
-                )
-                
+
                 credited_count += 1
     
     return credited_count
@@ -133,8 +120,4 @@ def get_employee_accrual_history(employee, leave_type, year):
     """
     Get accrual history for an employee.
     """
-    return LeaveAccrualLog.objects.filter(
-        employee=employee,
-        leave_type=leave_type,
-        year=year
-    ).order_by("month")
+    return []

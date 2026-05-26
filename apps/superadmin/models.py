@@ -15,13 +15,11 @@ class SystemSetting(models.Model):
     CATEGORY_GENERAL = "general"
     CATEGORY_EMAIL = "email"
     CATEGORY_SECURITY = "security"
-    CATEGORY_FEATURES = "features"
 
     CATEGORY_CHOICES = [
         (CATEGORY_GENERAL, "General"),
         (CATEGORY_EMAIL, "Email"),
         (CATEGORY_SECURITY, "Security"),
-        (CATEGORY_FEATURES, "Features"),
     ]
 
     TYPE_STRING = "string"

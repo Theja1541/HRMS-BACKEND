@@ -1,5 +1,5 @@
-from datetime import timedelta
-from apps.attendance.models import Attendance, Holiday
+from apps.attendance.models import Attendance
+from apps.holidays.models import Holiday
 
 
 def sync_leave_to_attendance(leave):
@@ -9,7 +9,7 @@ def sync_leave_to_attendance(leave):
     while current_date <= leave.end_date:
 
         # Skip holidays
-        if Holiday.objects.filter(date=current_date).exists():
+        if Holiday.objects.filter(from_date__lte=current_date, to_date__gte=current_date, is_active=True).exists():
             current_date += timedelta(days=1)
             continue
 

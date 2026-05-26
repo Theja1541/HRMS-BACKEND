@@ -22,13 +22,6 @@ DEFAULT_SETTING_VALUES = {
     "max_login_attempts": "5",
     "require_mfa": "false",
     "password_expiry_days": "90",
-    "enable_leave_module": "true",
-    "enable_payroll_module": "true",
-    "enable_asset_module": "true",
-    "enable_attendance_module": "true",
-    "enable_support_tickets": "true",
-    "enable_notifications_module": "true",
-    "enable_billing_module": "true",
 }
 
 FEATURE_FLAG_KEYS = {
@@ -39,6 +32,8 @@ FEATURE_FLAG_KEYS = {
     "support": "enable_support_tickets",
     "notifications": "enable_notifications_module",
     "billing": "enable_billing_module",
+    "holidays": "enable_holiday_module",
+    "daybook": "enable_daybook_module",
 }
 
 
@@ -67,25 +62,24 @@ def get_int_setting(key, default=0, minimum=None, maximum=None):
     return value
 
 
-def is_module_enabled(module_name):
-    key = FEATURE_FLAG_KEYS.get(module_name)
-    if not key:
-        return True
-    return get_bool_setting(key, True)
+def is_module_enabled(module_name, company=None):
+    if company is not None and isinstance(getattr(company, "enabled_modules", None), dict):
+        return bool(company.enabled_modules.get(module_name, True))
+    return True
 
 
-def get_effective_settings_payload():
+def get_effective_settings_payload(company=None):
     return {
         "features": {
-            module: is_module_enabled(module)
+            module: is_module_enabled(module, company=company)
             for module in FEATURE_FLAG_KEYS
         },
         "security": {
             "require_mfa": get_bool_setting("require_mfa", False),
             "min_password_length": get_int_setting("min_password_length", 8, minimum=1),
-            "max_login_attempts": get_int_setting("max_login_attempts", 5, minimum=1),
+            "max_login_attempts": get_int_setting("max_login_attempts", 5, minimum=0),
             "session_timeout_minutes": get_int_setting(
-                "session_timeout_minutes", 60, minimum=5
+                "session_timeout_minutes", 60, minimum=1
             ),
             "password_expiry_days": get_int_setting(
                 "password_expiry_days", 90, minimum=0
@@ -116,6 +110,9 @@ def is_password_expired(user):
 def issue_token_pair_for_user(user):
     refresh = RefreshToken.for_user(user)
     access = refresh.access_token
-    timeout_minutes = get_int_setting("session_timeout_minutes", 60, minimum=5)
+    timeout_minutes = get_int_setting("session_timeout_minutes", 60, minimum=1)
+    
     access.set_exp(lifetime=timedelta(minutes=timeout_minutes))
+    refresh.set_exp(lifetime=timedelta(minutes=timeout_minutes))
+    
     return str(access), str(refresh)

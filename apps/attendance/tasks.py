@@ -125,3 +125,36 @@ def send_monthly_attendance_email():
 def send_monthly_attendance_manual(year, month):
     for employee in Employee.objects.filter(is_active=True):
         generate_and_send(employee, year, month)
+
+@shared_task
+def auto_generate_holiday_attendance():
+    """
+    Checks if today is a holiday. If yes, marks attendance as HOLIDAY for all active employees.
+    Can be run daily via celery beat.
+    """
+    from django.utils import timezone
+    from apps.attendance.utils import is_holiday
+    
+    today = timezone.now().date()
+    is_hol, holiday_obj = is_holiday(today)
+    
+    if not is_hol:
+        return "Not a holiday today."
+        
+    employees = Employee.objects.filter(is_active=True)
+    created_count = 0
+    
+    for emp in employees:
+        # Avoid creating duplicates if attendance already exists
+        att, created = Attendance.objects.get_or_create(
+            employee=emp,
+            date=today,
+            defaults={
+                'status': 'HOLIDAY',
+                'source': 'AUTO_SYSTEM'
+            }
+        )
+        if created:
+            created_count += 1
+            
+    return f"Created {created_count} holiday attendance records for {today}."

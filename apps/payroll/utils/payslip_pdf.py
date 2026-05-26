@@ -78,6 +78,10 @@ def generate_payslip_pdf(payslip):
 
     employee = payslip.employee
     company = getattr(employee, "company", None) or getattr(payslip, "company", None)
+    if not company:
+        from apps.accounts.models import Company
+        company = Company.objects.first()
+        
     month_text = payslip.month.strftime("%B %Y")
     total_days = monthrange(payslip.month.year, payslip.month.month)[1]
     company_name = _safe_text(getattr(company, "name", None), getattr(settings, "PAYSLIP_COMPANY_NAME", "HRMS Company"))

@@ -10,6 +10,8 @@ from .constants import (
     STATUS_HOLIDAY,
     STATUS_WEEK_OFF,
 )
+from apps.holidays.models import Holiday
+
 
 
 class AttendanceCalculator:
@@ -44,6 +46,30 @@ class AttendanceCalculator:
             - holiday_days
             - week_off_days
         )
+        
+        # Calculate Unpaid Holidays
+        # Find which dates within this month are unpaid holidays
+        unpaid_holiday_qs = Holiday.objects.filter(
+            is_active=True,
+            payment_type="UNPAID",
+            from_date__year__lte=year,
+            to_date__year__gte=year,
+            from_date__month__lte=month,
+            to_date__month__gte=month,
+        )
+        unpaid_holiday_dates = set()
+        from datetime import timedelta
+        for h in unpaid_holiday_qs:
+            curr = h.from_date
+            while curr <= (h.to_date or h.from_date):
+                if curr.year == year and curr.month == month:
+                    unpaid_holiday_dates.add(curr)
+                curr += timedelta(days=1)
+                
+        # Count how many STATUS_HOLIDAY records fall on an unpaid holiday date
+        unpaid_holiday_days = sum(
+            1 for r in records if r.status == STATUS_HOLIDAY and r.date in unpaid_holiday_dates
+        )
 
         # Payroll calculations
         payable_days = (
@@ -56,6 +82,7 @@ class AttendanceCalculator:
             unpaid_leave_days
             + absent_days
             + (half_days * 0.5)
+            + unpaid_holiday_days
         )
 
         attendance_percentage = 0

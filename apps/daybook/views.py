@@ -5,21 +5,26 @@ from django.db.models import Sum, Q
 from datetime import datetime, timedelta
 from .models import Vendor, Category, Transaction
 from .serializers import VendorSerializer, CategorySerializer, TransactionSerializer
-from .permissions import IsAdminOrHR
+from .permissions import IsFinanceAdminOrHR
 
 class VendorViewSet(viewsets.ModelViewSet):
     queryset = Vendor.objects.all()
     serializer_class = VendorSerializer
-    permission_classes = [IsAdminOrHR]
+    permission_classes = [IsFinanceAdminOrHR]
     filterset_fields = ['vendor_type', 'is_active']
     search_fields = ['name', 'contact_person', 'phone', 'email']
     ordering_fields = ['name', 'created_at']
+
+    def perform_destroy(self, instance):
+        instance.is_deleted = True
+        instance.deleted_at = datetime.now()
+        instance.save()
 
 
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
-    permission_classes = [IsAdminOrHR]
+    permission_classes = [IsFinanceAdminOrHR]
     filterset_fields = ['category_type', 'is_active']
     search_fields = ['name']
     ordering_fields = ['name', 'created_at']
@@ -28,40 +33,38 @@ class CategoryViewSet(viewsets.ModelViewSet):
 class TransactionViewSet(viewsets.ModelViewSet):
     queryset = Transaction.objects.select_related('category', 'from_vendor', 'to_vendor', 'created_by').all()
     serializer_class = TransactionSerializer
-    permission_classes = [IsAdminOrHR]
+    permission_classes = [IsFinanceAdminOrHR]
     filterset_fields = ['payment_mode', 'gst_applicable', 'category']
     search_fields = ['details', 'from_vendor__name', 'to_vendor__name', 'category__name']
     ordering_fields = ['date', 'created_at']
 
+    def perform_destroy(self, instance):
+        instance.is_deleted = True
+        instance.deleted_at = datetime.now()
+        instance.save()
+
     def perform_create(self, serializer):
-        # Check balance before debit transaction
-        debit_amount = serializer.validated_data.get('debit_amount', 0)
-        gst_amount = serializer.validated_data.get('gst_amount', 0) if serializer.validated_data.get('gst_applicable', False) else 0
+        today = datetime.now()
+        date_str = today.strftime('%Y%m%d')
+        latest_txn = Transaction.all_objects.filter(
+            transaction_number__startswith=f'TXN-{date_str}-'
+        ).order_by('-transaction_number').first()
+
+        if latest_txn and latest_txn.transaction_number:
+            try:
+                seq = int(latest_txn.transaction_number.split('-')[-1])
+                new_seq = seq + 1
+            except ValueError:
+                new_seq = 1
+        else:
+            new_seq = 1
+
+        txn_number = f'TXN-{date_str}-{new_seq:04d}'
+
+        # Balance tracking is done in the dashboard, but we won't block debit transactions
+        # to allow for overdrafts, initial expenses, or credit scenarios.
         
-        if debit_amount > 0:
-            total_debit_required = debit_amount + gst_amount
-            
-            # Calculate current balance including GST
-            transactions = Transaction.objects.all()
-            total_credit = 0
-            total_debit = 0
-            
-            for txn in transactions:
-                txn_gst = txn.gst_amount if txn.gst_applicable else 0
-                if txn.credit_amount > 0:
-                    total_credit += txn.credit_amount + txn_gst
-                if txn.debit_amount > 0:
-                    total_debit += txn.debit_amount + txn_gst
-            
-            current_balance = total_credit - total_debit
-            
-            if current_balance < total_debit_required:
-                from rest_framework.exceptions import ValidationError
-                raise ValidationError({
-                    'error': f'Insufficient balance. Current balance: ₹{current_balance:.2f}, Required: ₹{total_debit_required:.2f} (Amount: ₹{debit_amount:.2f} + GST: ₹{gst_amount:.2f})'
-                })
-        
-        serializer.save(created_by=self.request.user)
+        serializer.save(created_by=self.request.user, transaction_number=txn_number)
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -84,7 +87,7 @@ class TransactionViewSet(viewsets.ModelViewSet):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminOrHR])
+@permission_classes([IsFinanceAdminOrHR])
 def dashboard_summary(request):
     # Get date range from query params or default to current month
     start_date = request.query_params.get('start_date')
@@ -125,7 +128,7 @@ def dashboard_summary(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminOrHR])
+@permission_classes([IsFinanceAdminOrHR])
 def vendor_payments_report(request):
     start_date = request.query_params.get('start_date')
     end_date = request.query_params.get('end_date')
@@ -143,7 +146,7 @@ def vendor_payments_report(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminOrHR])
+@permission_classes([IsFinanceAdminOrHR])
 def expense_summary_report(request):
     start_date = request.query_params.get('start_date')
     end_date = request.query_params.get('end_date')
@@ -162,7 +165,7 @@ def expense_summary_report(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminOrHR])
+@permission_classes([IsFinanceAdminOrHR])
 def gst_transactions_report(request):
     start_date = request.query_params.get('start_date')
     end_date = request.query_params.get('end_date')
@@ -179,7 +182,7 @@ def gst_transactions_report(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminOrHR])
+@permission_classes([IsFinanceAdminOrHR])
 def monthly_report(request):
     year = int(request.query_params.get('year', datetime.now().year))
     month = int(request.query_params.get('month', datetime.now().month))

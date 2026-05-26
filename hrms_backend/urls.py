@@ -60,6 +60,7 @@ urlpatterns = [
     path('api/payroll/', include('apps.payroll.urls')),
     path('api/assets/', include('apps.assets.urls')),
     path("api/support/", include("apps.support.urls")),
+    path("api/holidays/", include("apps.holidays.urls")),
     path("api/superadmin/", include("apps.superadmin.urls")),
 
     path("api/accounts/token/refresh/", custom_token_refresh),

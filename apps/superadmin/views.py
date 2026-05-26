@@ -9,7 +9,6 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from datetime import date, timedelta
-
 from apps.accounts.permissions import IsSuperAdmin
 from apps.accounts.models import User, Company
 from apps.employees.models import Employee
@@ -69,21 +68,6 @@ DEFAULT_SETTINGS = [
     {"key": "password_expiry_days", "value": "90", "label": "Password Expiry (days)",
      "description": "Force password reset after this many days (0 = never).", "category": "security", "value_type": "integer"},
 
-    # Features
-    {"key": "enable_leave_module", "value": "true", "label": "Leave Management",
-     "description": "Enable/disable the leave management module.", "category": "features", "value_type": "boolean"},
-    {"key": "enable_payroll_module", "value": "true", "label": "Payroll Module",
-     "description": "Enable/disable the payroll module.", "category": "features", "value_type": "boolean"},
-    {"key": "enable_asset_module", "value": "true", "label": "Asset Management",
-     "description": "Enable/disable asset tracking module.", "category": "features", "value_type": "boolean"},
-    {"key": "enable_attendance_module", "value": "true", "label": "Attendance Module",
-     "description": "Enable/disable attendance tracking.", "category": "features", "value_type": "boolean"},
-    {"key": "enable_support_tickets", "value": "true", "label": "Support Tickets",
-     "description": "Enable/disable the support ticket system.", "category": "features", "value_type": "boolean"},
-    {"key": "enable_notifications_module", "value": "true", "label": "Notifications",
-     "description": "Enable/disable the notifications module.", "category": "features", "value_type": "boolean"},
-    {"key": "enable_billing_module", "value": "true", "label": "Billing Module",
-     "description": "Enable/disable the billing module.", "category": "features", "value_type": "boolean"},
 ]
 
 
@@ -137,7 +121,8 @@ def settings_list(request):
 def effective_settings(request):
     """Return settings that normal portals need to enforce locally."""
     seed_default_settings()
-    return Response(get_effective_settings_payload())
+    company = getattr(request.user, "company", None)
+    return Response(get_effective_settings_payload(company=company))
 
 
 def _apply_smtp_to_django(settings_dict=None):
@@ -161,14 +146,21 @@ def _apply_smtp_to_django(settings_dict=None):
     except (ValueError, TypeError):
         port_int = 587
 
+    import os
     # Patch Django settings live (affects next email send in this process)
-    django_settings.EMAIL_HOST          = host.strip()
+    django_settings.EMAIL_HOST          = host.strip() or os.getenv("EMAIL_HOST", "smtp.gmail.com")
     django_settings.EMAIL_PORT          = port_int
-    django_settings.EMAIL_HOST_USER     = user.strip()
-    django_settings.EMAIL_HOST_PASSWORD = password.strip()
-    django_settings.EMAIL_USE_TLS       = use_tls_bool
-    django_settings.EMAIL_USE_SSL       = False
-    django_settings.DEFAULT_FROM_EMAIL  = from_em.strip()
+    django_settings.EMAIL_HOST_USER     = user.strip() or os.getenv("EMAIL_HOST_USER", "")
+    django_settings.EMAIL_HOST_PASSWORD = password.strip() or os.getenv("EMAIL_HOST_PASSWORD", "")
+    
+    if port_int == 465:
+        django_settings.EMAIL_USE_SSL = True
+        django_settings.EMAIL_USE_TLS = False
+    else:
+        django_settings.EMAIL_USE_SSL = False
+        django_settings.EMAIL_USE_TLS = use_tls_bool
+        
+    django_settings.DEFAULT_FROM_EMAIL  = from_em.strip() or "no-reply@hrms.com"
 
     # Force Django's mail module to pick up fresh connection on next send
     _mail.outbox = getattr(_mail, "outbox", [])  # noqa — only present in test mode
@@ -416,17 +408,20 @@ def reports_overview(request):
     # ── Top companies by employee count ───────
     top_companies = list(
         Company.objects
-        .annotate(employee_count=Count("employees"))
+        .annotate(employee_count=Count("users", filter=Q(users__role='EMPLOYEE')))
         .filter(is_active=True)
         .order_by("-employee_count")[:10]
-        .values("id", "name", "company_code", "employee_count", "plan", "subscription_period_end")
+        .values("id", "name", "company_code", "employee_count", "subscription_period_end")
     )
 
     # ── Plan distribution ─────────────────────
+    # Company.pricing_plan was removed from the model in recent migrations.
+    # Derive plan distribution from completed Payments (pricing_plan used on Payment).
     plan_distribution = list(
-        Company.objects
+        Payment.objects
+        .filter(status="COMPLETED", pricing_plan__isnull=False)
         .values("pricing_plan__name")
-        .annotate(count=Count("id"))
+        .annotate(count=Count("pricing_plan__name"))
         .order_by("-count")
     )
 
@@ -491,7 +486,7 @@ def monthly_growth_analytics(request):
     )
     leaves = (
         LeaveRequest.objects
-        .annotate(month=TruncMonth("created_at"))
+        .annotate(month=TruncMonth("applied_on"))
         .values("month")
         .annotate(count=Count("id"))
         .order_by("month")
@@ -551,9 +546,13 @@ def _send_mfa_otp_email(user, raw_otp: str):
 """.strip()
 
     from_email = getattr(django_settings, "DEFAULT_FROM_EMAIL", "no-reply@hrms.com")
-    msg = EmailMultiAlternatives(subject, text_content, from_email, [user.email])
-    msg.attach_alternative(html_content, "text/html")
-    msg.send(fail_silently=False)
+    
+    _apply_smtp_to_django()
+    from django.core.mail import get_connection
+    with get_connection() as connection:
+        msg = EmailMultiAlternatives(subject, text_content, from_email, [user.email], connection=connection)
+        msg.attach_alternative(html_content, "text/html")
+        msg.send(fail_silently=False)
 
 
 # ─────────────────────────────────────────

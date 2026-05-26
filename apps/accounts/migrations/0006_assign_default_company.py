@@ -34,33 +34,27 @@ def assign_default_company(apps, schema_editor):
     Attendance = apps.get_model("attendance", "Attendance")
     Holiday = apps.get_model("attendance", "Holiday")
     WorkCalendar = apps.get_model("attendance", "WorkCalendar")
-    Shift = apps.get_model("attendance", "Shift")
     Attendance.objects.filter(company__isnull=True).update(company=default_company)
     Holiday.objects.filter(company__isnull=True).update(company=default_company)
     WorkCalendar.objects.filter(company__isnull=True).update(company=default_company)
-    Shift.objects.filter(company__isnull=True).update(company=default_company)
 
     # Payroll
     Salary = apps.get_model("payroll", "Salary")
     Payslip = apps.get_model("payroll", "Payslip")
     PayrollMonth = apps.get_model("payroll", "PayrollMonth")
     ProfessionalTaxSlab = apps.get_model("payroll", "ProfessionalTaxSlab")
-    FullFinalSettlement = apps.get_model("payroll", "FullFinalSettlement")
     SalaryRevision = apps.get_model("payroll", "SalaryRevision")
     Salary.objects.filter(company__isnull=True).update(company=default_company)
     Payslip.objects.filter(company__isnull=True).update(company=default_company)
     PayrollMonth.objects.filter(company__isnull=True).update(company=default_company)
     ProfessionalTaxSlab.objects.filter(company__isnull=True).update(company=default_company)
-    FullFinalSettlement.objects.filter(company__isnull=True).update(company=default_company)
     SalaryRevision.objects.filter(company__isnull=True).update(company=default_company)
 
     # Leaves
     LeaveType = apps.get_model("leaves", "LeaveType")
     LeaveRequest = apps.get_model("leaves", "LeaveRequest")
-    LeaveHoliday = apps.get_model("leaves", "Holiday")
     LeaveType.objects.filter(company__isnull=True).update(company=default_company)
     LeaveRequest.objects.filter(company__isnull=True).update(company=default_company)
-    LeaveHoliday.objects.filter(company__isnull=True).update(company=default_company)
 
     # Notifications, Assets, Audit
     Notification = apps.get_model("notifications", "Notification")

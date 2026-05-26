@@ -169,12 +169,6 @@ class Employee(models.Model):
     blank=True
 )
 
-    shift = models.ForeignKey(
-    "attendance.Shift",
-    on_delete=models.SET_NULL,
-    null=True,
-    blank=True
-)
 
     is_work_from_home = models.BooleanField(default=False)
     history = models.JSONField(default=list, blank=True)

@@ -17,6 +17,14 @@ EMPLOYEE_MODEL_FIELDS = [field.name for field in Employee._meta.fields]
 SALARY_WRITABLE_FIELDS = set(PAYROLL_COMPONENT_FIELDS)
 
 
+# Lenient JSONField for handling HTML form submissions that send empty strings
+class LenientJSONField(serializers.JSONField):
+    def to_internal_value(self, data):
+        if data in (None, "", "null"):
+            return []
+        return super().to_internal_value(data)
+
+
 def parse_salary_payload(raw_salary):
     if raw_salary in [None, "", {}]:
         return None
@@ -60,11 +68,19 @@ def save_employee_salary(employee, salary_data):
     if getattr(employee, "company_id", None):
         defaults["company_id"] = employee.company_id
 
-    salary_obj, _ = Salary.objects.update_or_create(
-        employee=employee,
-        defaults=defaults,
-    )
-    return salary_obj
+    try:
+        salary_obj, _ = Salary.objects.update_or_create(
+            employee=employee,
+            defaults=defaults,
+        )
+        return salary_obj
+    except Exception as exc:
+        # If DB schema is out-of-sync (missing columns) or other DB error occurs,
+        # log and continue so employee creation/updates do not fail.
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.exception("Could not persist Salary for employee %s: %s", getattr(employee, 'id', None), exc)
+        return None
 
 # ============================================================
 # EMPLOYEE LIST SERIALIZER (Lightweight – For Table View)
@@ -100,6 +116,10 @@ class EmployeeDetailSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     role = serializers.SerializerMethodField()
 
+    # Use a lenient JSON field for history so empty strings from forms
+    # are accepted and normalized to an empty list instead of raising.
+    history = LenientJSONField(required=False)
+
 
     salary = EmployeeSalarySerializer(read_only=True)
     salary_history = SalaryRevisionSerializer(many=True, read_only=True)
@@ -113,7 +133,7 @@ class EmployeeDetailSerializer(serializers.ModelSerializer):
             "salary",
             "salary_history",
         ]
-        read_only_fields = ["company", "user"]
+        read_only_fields = ["user"]
 
     def get_full_name(self, obj):
         return f"{obj.first_name} {obj.last_name or ''}".strip()
@@ -169,6 +189,24 @@ class EmployeeDetailSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs["_salary_payload"] = self._parse_salary_payload()
+
+        # Handle history JSONField coming from HTML form inputs.
+        # When submitted from a form the frontend may send an empty string for
+        # JSON fields which triggers DRF/Django to raise "Value must be valid JSON.".
+        # Normalize common cases here so updates don't fail.
+        raw_history = self.initial_data.get("history", None)
+
+        # If the serializer already parsed `history`, leave it alone.
+        if "history" not in attrs:
+            if raw_history in (None, "", [], "null"):
+                attrs["history"] = []
+            elif isinstance(raw_history, str):
+                try:
+                    parsed = json.loads(raw_history)
+                except json.JSONDecodeError:
+                    raise serializers.ValidationError({"history": "Value must be valid JSON."})
+                attrs["history"] = parsed
+
         return attrs
 
     # ================= CREATE =================

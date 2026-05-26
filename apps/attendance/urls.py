@@ -24,17 +24,16 @@ urlpatterns = [
     path("my-attendance/", views.my_attendance),
     path("monthly-report/", views.monthly_report),
     path("mark/", views.mark_attendance),
-    path("bulk-mark/", views.bulk_mark_attendance),
-    path("unlock/", views.unlock_attendance),
-    path(
-    "export-my-attendance/",
-    export_my_attendance,
-    name="export_my_attendance"
-),
-    path("send-monthly-email/", send_attendance_now),
-    path("generate-today/", generate_today_attendance),
-    path("edited-history/", edited_attendance_history),
-
+    path("bulk-mark/", views.bulk_mark_attendance, name="bulk-mark"),
+    path("unlock/", views.unlock_attendance, name="unlock"),
+    path("my-attendance/export/", views.export_my_attendance, name="export-my-attendance"),
+    
+    # 🌟 Generate & Notify API
+    path('generate-today/', views.generate_today_attendance, name='generate-today'),
+    path('send-monthly-email/', views.send_attendance_now, name='send-monthly-email'),
+    
+    # 🌟 Day Status API
+    path("day-status/", views.attendance_day_status, name="day-status"),
+    path("dashboard-summary/", views.dashboard_summary),
+    path("edited-history/", views.edited_attendance_history),
 ]
-
-
