@@ -40,6 +40,14 @@ class CompanySerializer(serializers.ModelSerializer):
             "billing_action_stopped",
             "logo_url",
             "enabled_modules",
+            "address",
+            "phone",
+            "gstin",
+            "state",
+            "state_code",
+            "bank_account_no",
+            "bank_ifsc",
+            "bank_branch",
         ]
         read_only_fields = [
             "created_at",
