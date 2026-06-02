@@ -14,7 +14,7 @@ from apps.accounts.models import User, Company
 from apps.employees.models import Employee
 from apps.leaves.models import LeaveRequest
 from apps.payroll.models import Payslip
-from apps.billing.models import Payment, Invoice, PricingPlan
+from apps.billing.models import SubscriptionPlan, CompanySubscription, PaymentTransaction, GSTInvoice
 from apps.audit.utils import log_action
 
 from .models import SystemSetting, MfaOtpRecord, create_or_replace_otp
@@ -207,7 +207,17 @@ def settings_update(request):
                 )
         elif setting.value_type == SystemSetting.TYPE_INTEGER:
             try:
-                normalized_updates[key] = str(int(value))
+                val = int(value)
+                if key == "session_timeout_minutes" and (val < 1 or val > 525600):
+                    return Response({"error": "Session timeout must be between 1 and 525600 minutes (1 year)."}, status=status.HTTP_400_BAD_REQUEST)
+                if key == "min_password_length" and (val < 1 or val > 128):
+                    return Response({"error": "Password length must be between 1 and 128."}, status=status.HTTP_400_BAD_REQUEST)
+                if key == "max_login_attempts" and (val < 0 or val > 100):
+                    return Response({"error": "Max login attempts must be between 0 and 100."}, status=status.HTTP_400_BAD_REQUEST)
+                if key == "password_expiry_days" and (val < 0 or val > 3650):
+                    return Response({"error": "Password expiry must be between 0 and 3650 days."}, status=status.HTTP_400_BAD_REQUEST)
+                
+                normalized_updates[key] = str(val)
             except (TypeError, ValueError):
                 return Response(
                     {"error": f"{key} must be an integer."},
@@ -355,16 +365,16 @@ def reports_overview(request):
     new_users_30d = User.objects.filter(date_joined__date__gte=thirty_days_ago).count()
 
     # Billing
-    total_revenue = Payment.objects.filter(status="COMPLETED").aggregate(
+    total_revenue = PaymentTransaction.objects.filter(payment_status="completed").aggregate(
         total=Sum("amount")
     )["total"] or 0
-    revenue_30d = Payment.objects.filter(
-        status="COMPLETED", payment_date__gte=thirty_days_ago
+    revenue_30d = PaymentTransaction.objects.filter(
+        payment_status="completed", paid_at__date__gte=thirty_days_ago
     ).aggregate(total=Sum("amount"))["total"] or 0
 
-    paid_invoices = Invoice.objects.filter(status="PAID").count()
-    pending_invoices = Invoice.objects.filter(status__in=["SENT", "DRAFT"]).count()
-    overdue_invoices = Invoice.objects.filter(status="OVERDUE").count()
+    paid_invoices = GSTInvoice.objects.count()
+    pending_invoices = PaymentTransaction.objects.filter(payment_status="pending").count()
+    overdue_invoices = PaymentTransaction.objects.filter(payment_status="failed").count()
 
     # Subscriptions expiring in 30 days
     expiring_soon = Company.objects.filter(
@@ -392,9 +402,9 @@ def reports_overview(request):
         .order_by("month")
     )
     monthly_revenue = list(
-        Payment.objects
-        .filter(status="COMPLETED", payment_date__gte=twelve_months_ago)
-        .annotate(month=TruncMonth("payment_date"))
+        PaymentTransaction.objects
+        .filter(payment_status="completed", paid_at__date__gte=twelve_months_ago)
+        .annotate(month=TruncMonth("paid_at"))
         .values("month")
         .annotate(total=Sum("amount"))
         .order_by("month")
@@ -415,28 +425,36 @@ def reports_overview(request):
     )
 
     # ── Plan distribution ─────────────────────
-    # Company.pricing_plan was removed from the model in recent migrations.
-    # Derive plan distribution from completed Payments (pricing_plan used on Payment).
     plan_distribution = list(
-        Payment.objects
-        .filter(status="COMPLETED", pricing_plan__isnull=False)
-        .values("pricing_plan__name")
-        .annotate(count=Count("pricing_plan__name"))
+        CompanySubscription.objects
+        .filter(is_active=True)
+        .values("subscription_plan__name")
+        .annotate(count=Count("subscription_plan__name"))
         .order_by("-count")
     )
+    for pd in plan_distribution:
+        pd["pricing_plan__name"] = pd["subscription_plan__name"]
 
     # ── Recent payments ───────────────────────
     recent_payments = list(
-        Payment.objects
-        .select_related("company", "pricing_plan")
-        .filter(status="COMPLETED")
+        PaymentTransaction.objects
+        .select_related("company", "subscription__subscription_plan")
+        .filter(payment_status="completed")
         .order_by("-created_at")[:5]
-        .values(
-            "id", "amount", "currency", "payment_date", "status",
-            "company__name", "company__company_code",
-            "pricing_plan__name",
-        )
     )
+    
+    recent_payments_data = []
+    for rp in recent_payments:
+        recent_payments_data.append({
+            "id": rp.id,
+            "amount": float(rp.amount),
+            "currency": rp.currency,
+            "payment_date": rp.paid_at.date().isoformat() if rp.paid_at else None,
+            "status": "COMPLETED",
+            "company__name": rp.company.name,
+            "company__company_code": rp.company.company_code,
+            "pricing_plan__name": rp.subscription.subscription_plan.name if rp.subscription else "SaaS Subscription",
+        })
 
     return Response({
         "kpis": {
@@ -459,7 +477,7 @@ def reports_overview(request):
         "users_by_role": users_by_role,
         "top_companies": top_companies,
         "plan_distribution": plan_distribution,
-        "recent_payments": recent_payments,
+        "recent_payments": recent_payments_data,
     })
 
 

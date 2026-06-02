@@ -31,7 +31,6 @@ class PayslipCompanyLogoTests(TestCase):
             company=self.company,
         )
         self.employee = Employee.objects.create(
-            company=self.company,
             user=self.user,
             employee_id="EMP001",
             first_name="Test",
@@ -44,7 +43,6 @@ class PayslipCompanyLogoTests(TestCase):
             is_active=True,
         )
         self.payslip = Payslip.objects.create(
-            company=self.company,
             employee=self.employee,
             month=date(2026, 3, 1),
             basic=Decimal("30000"),
@@ -72,7 +70,7 @@ class PayslipCompanyLogoTests(TestCase):
         pdf_with_logo = generate_payslip_pdf(self.payslip)
         self.assertTrue(pdf_with_logo.startswith(b"%PDF"))
 
-        self.company.clear_logo_file()
+        self.company.logo = None
         self.company.save(update_fields=["logo", "updated_at"])
         pdf_without_logo = generate_payslip_pdf(self.payslip)
         self.assertTrue(pdf_without_logo.startswith(b"%PDF"))

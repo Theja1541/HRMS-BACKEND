@@ -171,6 +171,11 @@ class Employee(models.Model):
 
 
     is_work_from_home = models.BooleanField(default=False)
+
+    emergency_name = models.CharField(max_length=100, blank=True)
+    emergency_number = models.CharField(max_length=15, blank=True)
+    notes = models.TextField(blank=True)
+
     history = models.JSONField(default=list, blank=True)
     # ============================================================
     # TIMESTAMPS

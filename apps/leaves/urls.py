@@ -18,4 +18,5 @@ urlpatterns = [
     path("dashboard/", views.leave_dashboard),
     path("calendar/", views.leave_calendar),
     path("debug/", views.debug_leaves),
+    path("analytics/", views.leave_analytics),
 ]

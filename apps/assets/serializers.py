@@ -1,29 +1,90 @@
 from rest_framework import serializers
-from .models import Asset, AssetReturnRequest
+from .models import AssetCategory, Asset, AssetAssignment, AssetReturn, AssetMaintenance, AssetHistory
+from apps.employees.serializers import EmployeeListSerializer
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+
+class UserMinimalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'email', 'first_name', 'last_name']
+
+
+class AssetCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AssetCategory
+        fields = "__all__"
+        read_only_fields = ['company', 'created_at', 'updated_at']
+
 
 class AssetSerializer(serializers.ModelSerializer):
-    """Serializer for the unified Asset model."""
+    category_details = AssetCategorySerializer(source="category", read_only=True)
+    created_by_details = UserMinimalSerializer(source="created_by", read_only=True)
+    
     class Meta:
         model = Asset
-        fields = '__all__'
+        fields = "__all__"
+        read_only_fields = ['asset_code', 'company', 'created_at', 'updated_at']
 
-class AssetReturnRequestSerializer(serializers.ModelSerializer):
-    """Serializer for AssetReturnRequest model"""
+
+class AssetAssignmentSerializer(serializers.ModelSerializer):
+    asset_details = AssetSerializer(source="asset", read_only=True)
+    employee_details = EmployeeListSerializer(source="employee", read_only=True)
+    assigned_by_details = UserMinimalSerializer(source="assigned_by", read_only=True)
+
     class Meta:
-        model = AssetReturnRequest
-        fields = '__all__'
-        read_only_fields = ('request_date', 'approved_by', 'approval_date')
+        model = AssetAssignment
+        fields = "__all__"
+        read_only_fields = ['company', 'created_at', 'updated_at']
 
-class AssetReturnRequestCreateSerializer(serializers.ModelSerializer):
-    """Serializer used when creating a return request; sets employee from request user"""
+
+class AssetReturnSerializer(serializers.ModelSerializer):
+    assignment_details = AssetAssignmentSerializer(source="assignment", read_only=True)
+    returned_by_details = EmployeeListSerializer(source="returned_by", read_only=True)
+
     class Meta:
-        model = AssetReturnRequest
-        fields = ('asset', 'admin_remarks')
+        model = AssetReturn
+        fields = "__all__"
+        read_only_fields = ['company', 'created_at']
 
-    def create(self, validated_data):
-        request = self.context.get('request')
-        employee = getattr(request.user, 'employee_profile', None)
-        if not employee:
-            raise serializers.ValidationError('Employee profile not found')
-        validated_data['employee'] = employee
-        return super().create(validated_data)
+
+class AssetMaintenanceSerializer(serializers.ModelSerializer):
+    asset_details = AssetSerializer(source="asset", read_only=True)
+    created_by_details = UserMinimalSerializer(source="created_by", read_only=True)
+
+    class Meta:
+        model = AssetMaintenance
+        fields = "__all__"
+        read_only_fields = ['company', 'created_at']
+
+
+class AssetHistorySerializer(serializers.ModelSerializer):
+    asset_details = AssetSerializer(source="asset", read_only=True)
+    employee_details = EmployeeListSerializer(source="employee", read_only=True)
+    performed_by_details = UserMinimalSerializer(source="performed_by", read_only=True)
+
+    class Meta:
+        model = AssetHistory
+        fields = "__all__"
+        read_only_fields = ['company', 'action_date']
+
+
+class AssetRequestSerializer(serializers.ModelSerializer):
+    asset_details = AssetSerializer(source="asset", read_only=True)
+    employee_details = EmployeeListSerializer(source="employee", read_only=True)
+    approved_by_details = UserMinimalSerializer(source="approved_by", read_only=True)
+
+    class Meta:
+        from .models import AssetRequest
+        model = AssetRequest
+        fields = "__all__"
+        read_only_fields = ['company', 'request_date', 'approval_date', 'approved_by']
+
+
+class AssetRequestCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        from .models import AssetRequest
+        model = AssetRequest
+        fields = ['asset', 'request_type', 'employee_remarks']

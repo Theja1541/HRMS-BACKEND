@@ -31,7 +31,7 @@ class ModuleFeatureFlagMiddleware:
                 module_name, module_label = module
                 break
 
-        if module_name and not is_module_enabled(module_name):
+        if module_name and not is_module_enabled(module_name, company=getattr(request, "company", None)):
             user = getattr(request, "user", None)
             if not getattr(user, "is_authenticated", False):
                 try:

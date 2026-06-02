@@ -47,6 +47,8 @@ urlpatterns = [
     path('api/health/', health_check),
 
     path("api/billing/", include("apps.billing.urls")),
+    path("api/payments/", include("apps.billing.urls_payments")),
+    path("api/subscriptions/", include("apps.billing.urls_subscriptions")),
     path('api/accounts/', include('apps.accounts.urls')),
     path("api/auth/login/", login_view),
     path("api/auth/logout/", logout_view),

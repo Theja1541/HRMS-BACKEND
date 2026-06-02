@@ -56,16 +56,10 @@ def assign_default_company(apps, schema_editor):
     LeaveType.objects.filter(company__isnull=True).update(company=default_company)
     LeaveRequest.objects.filter(company__isnull=True).update(company=default_company)
 
-    # Notifications, Assets, Audit
+    # Notifications, Audit
     Notification = apps.get_model("notifications", "Notification")
-    CompanyAsset = apps.get_model("assets", "CompanyAsset")
-    AssetAssignment = apps.get_model("assets", "AssetAssignment")
-    AssetReturnRequest = apps.get_model("assets", "AssetReturnRequest")
     AuditLog = apps.get_model("audit", "AuditLog")
     Notification.objects.filter(company__isnull=True).update(company=default_company)
-    CompanyAsset.objects.filter(company__isnull=True).update(company=default_company)
-    AssetAssignment.objects.filter(company__isnull=True).update(company=default_company)
-    AssetReturnRequest.objects.filter(company__isnull=True).update(company=default_company)
     AuditLog.objects.filter(company__isnull=True).update(company=default_company)
 
 
@@ -82,7 +76,6 @@ class Migration(migrations.Migration):
         ("payroll", "0024_add_company_tenant"),
         ("leaves", "0010_add_company_tenant"),
         ("notifications", "0002_add_company_tenant"),
-        ("assets", "0003_add_company_tenant"),
         ("audit", "0002_add_company_tenant"),
     ]
 
