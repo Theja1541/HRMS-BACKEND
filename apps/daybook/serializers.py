@@ -1,18 +1,52 @@
 from rest_framework import serializers
-from .models import Vendor, Category, Transaction
+from apps.accounts.tenant_utils import get_current_company
+from .models import Vendor, Category, Transaction, TransactionItem
 
 class VendorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Vendor
         fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = ['company', 'created_at', 'updated_at']
+
+    def validate(self, data):
+        request = self.context.get('request')
+        company = get_current_company(request)
+        name = data.get('name')
+        
+        if name:
+            qs = Vendor.objects.filter(company=company, name__iexact=name)
+            if self.instance:
+                qs = qs.exclude(id=self.instance.id)
+            if qs.exists():
+                raise serializers.ValidationError({"name": "A vendor with this name already exists for your company."})
+        return data
 
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
         fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = ['company', 'created_at', 'updated_at']
+
+    def validate(self, data):
+        request = self.context.get('request')
+        company = get_current_company(request)
+        name = data.get('name')
+        
+        if name:
+            qs = Category.objects.filter(company=company, name__iexact=name)
+            if self.instance:
+                qs = qs.exclude(id=self.instance.id)
+            if qs.exists():
+                raise serializers.ValidationError({"name": "A category with this name already exists for your company."})
+        return data
+
+
+class TransactionItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TransactionItem
+        fields = '__all__'
+        read_only_fields = ['transaction', 'created_at']
 
 
 class TransactionSerializer(serializers.ModelSerializer):
@@ -22,11 +56,12 @@ class TransactionSerializer(serializers.ModelSerializer):
     from_vendor_gstin = serializers.CharField(source='from_vendor.gstin', read_only=True, allow_null=True)
     to_vendor_gstin = serializers.CharField(source='to_vendor.gstin', read_only=True, allow_null=True)
     created_by_name = serializers.CharField(source='created_by.username', read_only=True, allow_null=True)
+    items = TransactionItemSerializer(many=True, required=False)
 
     class Meta:
         model = Transaction
         fields = '__all__'
-        read_only_fields = ['transaction_number', 'created_by', 'created_at', 'updated_at']
+        read_only_fields = ['company', 'transaction_number', 'created_by', 'created_at', 'updated_at']
 
     def validate(self, data):
         debit = data.get('debit_amount') or 0
@@ -54,3 +89,21 @@ class TransactionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("GST amount is required if GST is applicable")
 
         return data
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items', [])
+        transaction = super().create(validated_data)
+        for item_data in items_data:
+            TransactionItem.objects.create(transaction=transaction, **item_data)
+        return transaction
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', None)
+        transaction = super().update(instance, validated_data)
+        
+        if items_data is not None:
+            instance.items.all().delete()
+            for item_data in items_data:
+                TransactionItem.objects.create(transaction=transaction, **item_data)
+                
+        return transaction

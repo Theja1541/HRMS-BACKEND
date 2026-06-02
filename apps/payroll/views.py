@@ -1489,13 +1489,15 @@ def send_single_payslip_email(request):
         employee__id=employee_id,
         month__year=month_date.year,
         month__month=month_date.month,
-        status="APPROVED"
+        status__in=["APPROVED", "PAID"]
     ).first()
 
     if not payslip:
-        return Response({"error": "Approved payslip not found"}, status=404)
+        return Response({"error": "Approved or Paid payslip not found"}, status=404)
 
-    send_payslip_email_service(payslip)
+    success = send_payslip_email_service(payslip)
+    if not success:
+        return Response({"error": "Failed to send email. Check email logs or configuration."}, status=500)
     return Response({"message": "Email sent"})
 
 
@@ -1508,7 +1510,7 @@ def bulk_email_payslips(request):
     payslips = Payslip.objects.filter(
         month__year=month_date.year,
         month__month=month_date.month,
-        status="APPROVED"
+        status__in=["APPROVED", "PAID"]
     )
 
     total = payslips.count()
@@ -1755,29 +1757,39 @@ def bulk_email_progress(request, batch_id):
 @api_view(["GET"])
 @permission_classes([IsHR])
 def payroll_dashboard_summary(request):
+    from datetime import date, datetime
+    from calendar import monthrange
+    from apps.accounts.tenant_utils import get_current_company
 
+    company = get_current_company(request)
     month_value = request.query_params.get("month")
 
     if not month_value:
         today = timezone.now()
         month_value = f"{today.year}-{str(today.month).zfill(2)}"
 
-    month_date = datetime.strptime(month_value, "%Y-%m").date()
+    try:
+        month_date = datetime.strptime(month_value, "%Y-%m").date()
+    except ValueError:
+        return Response({"error": "Invalid month format (YYYY-MM)"}, status=400)
 
-    payslips = Payslip.objects.filter(
-        month__year=month_date.year,
-        month__month=month_date.month
-    )
+    _, last_day = monthrange(month_date.year, month_date.month)
+    start_date = date(month_date.year, month_date.month, 1)
+    end_date = date(month_date.year, month_date.month, last_day)
+
+    payslips = Payslip.objects.filter(month__range=(start_date, end_date))
+    if company is not None:
+        payslips = payslips.filter(employee__user__company=company)
 
     total = payslips.count()
     draft = payslips.filter(status="NOT PAID").count()
     approved = payslips.filter(status="APPROVED").count()
     paid = payslips.filter(status="PAID").count()
 
-    payroll_month = PayrollMonth.objects.filter(
-        year=month_date.year,
-        month=month_date.month
-    ).first()
+    pm_kwargs = {"year": month_date.year, "month": month_date.month}
+    if company and hasattr(PayrollMonth, "company"):
+        pm_kwargs["company"] = company
+    payroll_month = PayrollMonth.objects.filter(**pm_kwargs).first()
 
     status_value = payroll_month.status if payroll_month else "OPEN"
 
@@ -2882,6 +2894,15 @@ def create_salary_revision(request):
             employer_esi=salary_components["employer_esi"],
             gratuity=salary_components["gratuity"],
         )
+
+        # Update current active salary structure
+        try:
+            from apps.employees.serializers import save_employee_salary
+            save_employee_salary(employee, salary_components)
+        except Exception as exc:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.exception("Failed to update active Salary record during revision for employee %s: %s", employee.id, exc)
 
         return Response({
             "message": "Salary revision created successfully",

@@ -1,26 +1,9 @@
 from django.contrib import admin
-from .models import Asset
+from .models import AssetCategory, Asset, AssetAssignment, AssetReturn, AssetMaintenance, AssetHistory
 
-
-@admin.register(Asset)
-class AssetAdmin(admin.ModelAdmin):
-    list_display = (
-        "asset_name",
-        "asset_type",
-        "serial_number",
-        "purchase_date",
-        "employee",
-        "status",
-        "assigned_date",
-        "returned_date",
-    )
-    list_filter = (
-        "asset_type",
-        "status",
-    )
-    search_fields = (
-        "asset_name",
-        "serial_number",
-        "employee__employee_id",
-    )
-    readonly_fields = ("created_at", "updated_at")
+admin.site.register(AssetCategory)
+admin.site.register(Asset)
+admin.site.register(AssetAssignment)
+admin.site.register(AssetReturn)
+admin.site.register(AssetMaintenance)
+admin.site.register(AssetHistory)

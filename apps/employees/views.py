@@ -380,18 +380,22 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
                 description=f"Admin created employee: {employee.first_name} {employee.last_name} ({employee.email})",
                 company=company,
             )
-            try:
-                issue_and_send_temporary_password(
-                    user=user,
-                    purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
-                    issued_by=self.request.user if self.request.user.is_authenticated else None,
-                    recipient_name=employee.first_name,
-                )
-            except TemporaryPasswordEmailError as exc:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.exception("Failed to send temporary password email to user %s (%s)", user.id, user.email)
-                # Do not fail employee creation if email sending fails; continue and log the issue.
+            # Send temporary password credentials email asynchronously in a background thread to prevent slowing down the request
+            import threading
+            def send_credentials_bg():
+                try:
+                    issue_and_send_temporary_password(
+                        user=user,
+                        purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
+                        issued_by=self.request.user if self.request.user.is_authenticated else None,
+                        recipient_name=employee.first_name,
+                    )
+                except Exception as exc:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.exception("Failed to send temporary password email to user %s (%s) in background: %s", user.id, user.email, exc)
+
+            threading.Thread(target=send_credentials_bg).start()
 
     # =====================================================
     # UPDATE EMPLOYEE (WITH HISTORY)
@@ -412,15 +416,32 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
                 employee.user.role = normalized_role
                 employee.user.save(update_fields=["role"])
 
+        if employee.history is None:
+            employee.history = []
+
         for field in tracked_fields:
             old_value = old_values.get(field)
             new_value = getattr(employee, field, None)
             if str(old_value) != str(new_value):
+                from django.db.models.fields.files import FieldFile
+                
+                safe_old = old_value
+                if isinstance(safe_old, FieldFile):
+                    safe_old = safe_old.url if safe_old else None
+                elif not isinstance(safe_old, (str, int, float, bool, type(None))):
+                    safe_old = str(safe_old)
+
+                safe_new = new_value
+                if isinstance(safe_new, FieldFile):
+                    safe_new = safe_new.url if safe_new else None
+                elif not isinstance(safe_new, (str, int, float, bool, type(None))):
+                    safe_new = str(safe_new)
+
                 # Append change to employee.history JSONField
                 employee.history.append({
                     "field_name": field,
-                    "old_value": old_value,
-                    "new_value": new_value,
+                    "old_value": safe_old,
+                    "new_value": safe_new,
                     "changed_by": self.request.user.id if self.request.user.is_authenticated else None,
                     "changed_at": timezone.now().isoformat(),
                 })
@@ -798,7 +819,14 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
     @action(detail=False, methods=["get"], url_path="department-distribution")
     def department_distribution(self, request):
         from django.db.models import Count
-        qs = self.get_queryset()
+        from apps.accounts.tenant_utils import get_current_company
+        
+        company = get_current_company(request)
+        # Query Employee directly to avoid heavy select_related("user", "salary") joins!
+        qs = Employee.objects.filter(is_active=True)
+        if company is not None:
+            qs = qs.filter(user__company=company)
+            
         data = qs.values("department").annotate(count=Count("id")).order_by("-count")
         
         formatted_data = []

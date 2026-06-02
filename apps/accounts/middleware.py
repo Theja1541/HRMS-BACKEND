@@ -44,6 +44,8 @@ class SubscriptionLockoutMiddleware(MiddlewareMixin):
             "/api/accounts/token/refresh",
             "/api/auth/logout",
             "/api/auth/token/refresh",
+            "/api/payments/",
+            "/api/subscriptions/",
         ]
 
         if any(path.startswith(prefix) for prefix in exempt_prefixes):

@@ -16,7 +16,12 @@ class LeaveType(models.Model):
         ("QUARTERLY", "Quarterly Accrual"),
     )
 
-    name = models.CharField(max_length=100, unique=True)
+    name = models.CharField(max_length=100)
+    code = models.CharField(max_length=20, default="DEFAULT") # Default will be replaced in migration
+    company = models.ForeignKey(
+        "accounts.Company", on_delete=models.CASCADE, null=True, blank=True, related_name="leave_types"
+    )
+    is_system_leave = models.BooleanField(default=False)
     annual_quota = models.DecimalField(max_digits=6, decimal_places=2, default=0)
 
     is_paid = models.BooleanField(default=True)
@@ -45,11 +50,37 @@ class LeaveType(models.Model):
         help_text="Allow employees to take leave even if balance is insufficient (will become LOP)"
     )
 
+    max_consecutive_days = models.PositiveIntegerField(null=True, blank=True)
+    advance_notice_days = models.PositiveIntegerField(default=0)
+    include_weekends = models.BooleanField(default=False)
+    include_holidays = models.BooleanField(default=False)
+    
+    document_required = models.BooleanField(default=False)
+    document_required_after_days = models.PositiveIntegerField(default=0)
+    
+    allowed_during_probation = models.BooleanField(default=True)
+    prorate_for_new_joiners = models.BooleanField(default=True)
+    
+    GENDER_CHOICES = (
+        ("ALL", "All"),
+        ("MALE", "Male"),
+        ("FEMALE", "Female"),
+    )
+    applicable_gender = models.CharField(max_length=10, choices=GENDER_CHOICES, default="ALL")
+    applicable_employment_types = models.JSONField(default=list, blank=True)
+    applicable_departments = models.JSONField(default=list, blank=True)
+    applicable_designations = models.JSONField(default=list, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['company', 'name'], name='unique_leave_name_per_company'),
+            models.UniqueConstraint(fields=['company', 'code'], name='unique_leave_code_per_company'),
+        ]
         indexes = [
             models.Index(fields=["is_active"]),
+            models.Index(fields=["company", "code"]),
         ]
 
     def __str__(self):
@@ -135,6 +166,8 @@ class LeaveRequest(models.Model):
     is_half_day = models.BooleanField(default=False)
 
     reason = models.TextField()
+
+    document = models.FileField(upload_to="leave_documents/", null=True, blank=True)
 
     status = models.CharField(
         max_length=20,

@@ -81,7 +81,7 @@ def custom_token_refresh(request):
         refresh.set_exp()
         access = refresh.access_token
         
-        timeout_minutes = get_int_setting("session_timeout_minutes", 60, minimum=1)
+        timeout_minutes = get_int_setting("session_timeout_minutes", 60, minimum=1, maximum=525600)
         access.set_exp(lifetime=timedelta(minutes=timeout_minutes))
         refresh.set_exp(lifetime=timedelta(minutes=timeout_minutes))
     except TokenError:
@@ -200,6 +200,7 @@ def _build_auth_user_payload(user, request=None):
         "company_id": user.company_id,
         "employee_profile_id": employee_profile_id,
         "company": company_data,
+        "hr_permissions": user.hr_permissions,
     }
 
 
@@ -367,6 +368,7 @@ def company_user_list(request):
 
 @api_view(["POST"])
 @permission_classes([IsCompanyAdminOrHR])
+@parser_classes([MultiPartParser, FormParser])
 def company_user_create(request):
     """
     Admin/HR can create HR users inside their own company.
@@ -383,10 +385,35 @@ def company_user_create(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    data = request.data.copy()
+    if hasattr(request.data, "dict"):
+        data = request.data.dict()
+    else:
+        data = request.data.copy()
+
     data["role"] = "HR"
     if not data.get("username"):
         data["username"] = str(data.get("email") or "").strip().lower()
+
+    # Parse stringified json permission field from multipart/form-data
+    import json
+    hr_permissions = data.get("hr_permissions")
+    if isinstance(hr_permissions, str):
+        try:
+            data["hr_permissions"] = json.loads(hr_permissions)
+        except Exception:
+            pass
+
+    employee_id = data.get("employee_id")
+    if employee_id:
+        employee_id = str(employee_id).strip()
+        if User.objects.filter(company=company, employee_id=employee_id).exists():
+            return Response({"employee_id": ["Employee ID already exists."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from apps.employees.models import Employee
+            if Employee.objects.filter(company=company, employee_id=employee_id).exists():
+                return Response({"employee_id": ["Employee ID already exists."]}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            pass
 
     serializer = CreateUserSerializer(data=data)
     if not serializer.is_valid():
@@ -427,6 +454,63 @@ def company_user_create(request):
         },
         status=status.HTTP_201_CREATED,
     )
+
+
+@api_view(["PATCH", "PUT"])
+@permission_classes([IsCompanyAdminOrHR])
+@parser_classes([MultiPartParser, FormParser])
+def company_user_update(request, user_id):
+    """
+    Admin can update HR user details and permissions inside their own company.
+    """
+    company = _get_request_company(request)
+    if not company:
+        return Response({"detail": "User has no company."}, status=status.HTTP_403_FORBIDDEN)
+        
+    user = get_object_or_404(User, id=user_id, company=company)
+    
+    # Check if target user is HR
+    if user.role != "HR":
+        return Response({"detail": "Only HR users can be updated from the company portal."}, status=status.HTTP_400_BAD_REQUEST)
+        
+    if hasattr(request.data, "dict"):
+        data = request.data.dict()
+    else:
+        data = request.data.copy()
+    
+    # Parse stringified json permission field from multipart/form-data
+    import json
+    hr_permissions = data.get("hr_permissions")
+    if isinstance(hr_permissions, str):
+        try:
+            data["hr_permissions"] = json.loads(hr_permissions)
+        except Exception:
+            pass
+            
+    employee_id = data.get("employee_id")
+    if employee_id:
+        employee_id = str(employee_id).strip()
+        if User.objects.filter(company=company, employee_id=employee_id).exclude(id=user.id).exists():
+            return Response({"employee_id": ["Employee ID already exists."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from apps.employees.models import Employee
+            if Employee.objects.filter(company=company, employee_id=employee_id).exclude(user=user).exists():
+                return Response({"employee_id": ["Employee ID already exists."]}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            pass
+            
+    # Serialize and update
+    serializer = UserSerializer(user, data=data, partial=True)
+    if serializer.is_valid():
+        updated_user = serializer.save()
+        log_action(
+            request, "UPDATE", "User",
+            object_id=updated_user.id,
+            description=f"Company user updated: {updated_user.email} (HR)",
+            company=company,
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # =========================================================
@@ -612,7 +696,7 @@ def superadmin_reset_password(request, user_id):
 # =========================================================
 
 @api_view(["PATCH"])
-@permission_classes([IsSuperAdmin])
+@permission_classes([IsSuperAdmin | IsCompanyAdminOrHR])
 def superadmin_block_user(request, user_id):
     user = get_object_or_404(User, id=user_id)
     if user == request.user:
@@ -620,6 +704,15 @@ def superadmin_block_user(request, user_id):
             {"error": "You cannot block yourself"},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    # Tenant check: Company-scoped admins/HR can only block/unblock users in their own company
+    if getattr(request.user, "role", "").upper() != "SUPER_ADMIN":
+        if getattr(user, "company_id", None) != getattr(request.user, "company_id", None):
+            return Response(
+                {"detail": "You can only modify users belonging to your company."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
     is_active = request.data.get("is_active")
     if is_active is None:
         return Response(
@@ -645,9 +738,18 @@ def superadmin_block_user(request, user_id):
 # =========================================================
 
 @api_view(["POST"])
-@permission_classes([IsSuperAdmin])
+@permission_classes([IsSuperAdmin | IsCompanyAdminOrHR])
 def superadmin_unlock_user(request, user_id):
     user = get_object_or_404(User, id=user_id)
+
+    # Tenant check: Company-scoped admins/HR can only unlock users in their own company
+    if getattr(request.user, "role", "").upper() != "SUPER_ADMIN":
+        if getattr(user, "company_id", None) != getattr(request.user, "company_id", None):
+            return Response(
+                {"detail": "You can only unlock users belonging to your company."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
     user.is_locked = False
     user.failed_attempts = 0
     user.locked_at = None
@@ -900,6 +1002,43 @@ def company_create(request):
     try:
         with transaction.atomic():
             company = serializer.save()
+
+            # Activate pricing plan subscription if provided
+            pricing_plan_id = request.data.get("pricing_plan") or request.data.get("pricing_plan_id")
+            if pricing_plan_id:
+                from datetime import datetime
+                from apps.billing.models import SubscriptionPlan
+                from apps.billing.services.subscription_service import SubscriptionService
+
+                start_date_str = request.data.get("subscription_period_start")
+                end_date_str = request.data.get("subscription_period_end")
+
+                start_date = None
+                if start_date_str:
+                    try:
+                        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        pass
+
+                end_date = None
+                if end_date_str:
+                    try:
+                        end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        pass
+
+                try:
+                    plan = SubscriptionPlan.objects.get(id=pricing_plan_id)
+                    SubscriptionService().activate_or_renew_subscription(
+                        company=company,
+                        plan=plan,
+                        billing_cycle="monthly",
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                except SubscriptionPlan.DoesNotExist:
+                    pass
+
             log_action(
                 request, "CREATE", "Company",
                 object_id=company.id,
@@ -967,6 +1106,15 @@ def company_detail(request, company_id):
 @permission_classes([IsSuperAdmin])
 def company_update(request, company_id):
     company = get_object_or_404(Company, id=company_id)
+
+    pricing_plan_id = request.data.get("pricing_plan") or request.data.get("pricing_plan_id")
+    start_date_str = request.data.get("subscription_period_start")
+    end_date_str = request.data.get("subscription_period_end")
+
+    admin_email = (request.data.get("admin_email") or "").strip().lower()
+    admin_first_name = (request.data.get("admin_first_name") or "").strip()
+    admin_last_name = (request.data.get("admin_last_name") or "").strip()
+
     serializer = CompanySerializer(
         company,
         data=request.data,
@@ -974,8 +1122,107 @@ def company_update(request, company_id):
         context={"request": request},
     )
     if serializer.is_valid():
-        serializer.save()
-        return Response(serializer.data)
+        try:
+            with transaction.atomic():
+                company = serializer.save()
+
+                # If pricing plan was explicitly passed (even if empty or null)
+                if pricing_plan_id is not None:
+                    if pricing_plan_id == "" or pricing_plan_id is None:
+                        # Deactivate current subscription
+                        from apps.billing.models import CompanySubscription
+                        CompanySubscription.objects.filter(company=company).update(is_active=False)
+                    else:
+                        from datetime import datetime
+                        from apps.billing.models import SubscriptionPlan
+                        from apps.billing.services.subscription_service import SubscriptionService
+
+                        start_date = None
+                        if start_date_str:
+                            try:
+                                start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+                            except ValueError:
+                                pass
+
+                        end_date = None
+                        if end_date_str:
+                            try:
+                                end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                            except ValueError:
+                                pass
+
+                        try:
+                            plan = SubscriptionPlan.objects.get(id=pricing_plan_id)
+                            SubscriptionService().activate_or_renew_subscription(
+                                company=company,
+                                plan=plan,
+                                billing_cycle="monthly",
+                                start_date=start_date,
+                                end_date=end_date
+                            )
+                        except SubscriptionPlan.DoesNotExist:
+                            pass
+                elif start_date_str or end_date_str:
+                    # If dates changed but plan stayed the same, update the dates on the active subscription
+                    from datetime import datetime
+                    from apps.billing.models import CompanySubscription
+                    sub = CompanySubscription.objects.filter(company=company, is_active=True).first()
+                    if sub:
+                        if start_date_str:
+                            try:
+                                sub.start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+                            except ValueError:
+                                pass
+                        if end_date_str:
+                            try:
+                                sub.end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                                sub.next_billing_date = sub.end_date
+                                company.subscription_period_end = sub.end_date
+                                company.save(update_fields=["subscription_period_end"])
+                            except ValueError:
+                                pass
+                        sub.save()
+
+                # Update or create Admin user if admin_email is provided
+                if admin_email:
+                    admin_user = User.objects.filter(company=company, role="ADMIN").first()
+                    if admin_user:
+                        if admin_email:
+                            admin_user.email = admin_email
+                            admin_user.username = admin_email
+                        if admin_first_name:
+                            admin_user.first_name = admin_first_name
+                        if admin_last_name:
+                            admin_user.last_name = admin_last_name
+                        admin_user.save(update_fields=["email", "username", "first_name", "last_name"])
+                    else:
+                        admin_user = User.objects.create(
+                            username=admin_email,
+                            email=admin_email,
+                            first_name=admin_first_name,
+                            last_name=admin_last_name,
+                            role="ADMIN",
+                            company=company,
+                            must_change_password=True,
+                        )
+                        admin_user.set_unusable_password()
+                        admin_user.save(update_fields=["password"])
+                        issue_and_send_temporary_password(
+                            user=admin_user,
+                            purpose=TemporaryPasswordRecord.PURPOSE_ONBOARDING,
+                            issued_by=request.user if request.user.is_authenticated else None,
+                            recipient_name=admin_user.get_full_name() or admin_user.email,
+                        )
+
+                # Re-serialize to reflect new subscription settings
+                response_serializer = CompanySerializer(company, context={"request": request})
+                return Response(response_serializer.data)
+        except Exception as e:
+            logger.exception("Company update failed")
+            return Response(
+                {"error": f"Failed to update company: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 

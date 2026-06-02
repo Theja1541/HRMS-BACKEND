@@ -3,11 +3,12 @@ from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
 from django.db.models import Sum, Q
 from datetime import datetime, timedelta
+from apps.accounts.tenant_utils import TenantQuerysetMixin, get_current_company
 from .models import Vendor, Category, Transaction
 from .serializers import VendorSerializer, CategorySerializer, TransactionSerializer
 from .permissions import IsFinanceAdminOrHR
 
-class VendorViewSet(viewsets.ModelViewSet):
+class VendorViewSet(TenantQuerysetMixin, viewsets.ModelViewSet):
     queryset = Vendor.objects.all()
     serializer_class = VendorSerializer
     permission_classes = [IsFinanceAdminOrHR]
@@ -21,7 +22,7 @@ class VendorViewSet(viewsets.ModelViewSet):
         instance.save()
 
 
-class CategoryViewSet(viewsets.ModelViewSet):
+class CategoryViewSet(TenantQuerysetMixin, viewsets.ModelViewSet):
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
     permission_classes = [IsFinanceAdminOrHR]
@@ -29,8 +30,17 @@ class CategoryViewSet(viewsets.ModelViewSet):
     search_fields = ['name']
     ordering_fields = ['name', 'created_at']
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        company = get_current_company(self.request)
+        if company and not qs.filter(company=company).exists():
+            from .models import seed_default_categories_for_company
+            seed_default_categories_for_company(company)
+            qs = super().get_queryset()
+        return qs
 
-class TransactionViewSet(viewsets.ModelViewSet):
+
+class TransactionViewSet(TenantQuerysetMixin, viewsets.ModelViewSet):
     queryset = Transaction.objects.select_related('category', 'from_vendor', 'to_vendor', 'created_by').all()
     serializer_class = TransactionSerializer
     permission_classes = [IsFinanceAdminOrHR]
@@ -44,9 +54,11 @@ class TransactionViewSet(viewsets.ModelViewSet):
         instance.save()
 
     def perform_create(self, serializer):
+        company = get_current_company(self.request)
         today = datetime.now()
         date_str = today.strftime('%Y%m%d')
         latest_txn = Transaction.all_objects.filter(
+            company=company,
             transaction_number__startswith=f'TXN-{date_str}-'
         ).order_by('-transaction_number').first()
 
@@ -64,7 +76,7 @@ class TransactionViewSet(viewsets.ModelViewSet):
         # Balance tracking is done in the dashboard, but we won't block debit transactions
         # to allow for overdrafts, initial expenses, or credit scenarios.
         
-        serializer.save(created_by=self.request.user, transaction_number=txn_number)
+        serializer.save(company=company, created_by=self.request.user, transaction_number=txn_number)
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -89,6 +101,7 @@ class TransactionViewSet(viewsets.ModelViewSet):
 @api_view(['GET'])
 @permission_classes([IsFinanceAdminOrHR])
 def dashboard_summary(request):
+    company = get_current_company(request)
     # Get date range from query params or default to current month
     start_date = request.query_params.get('start_date')
     end_date = request.query_params.get('end_date')
@@ -98,7 +111,7 @@ def dashboard_summary(request):
         start_date = today.replace(day=1).strftime('%Y-%m-%d')
         end_date = today.strftime('%Y-%m-%d')
     
-    transactions = Transaction.objects.filter(date__range=[start_date, end_date])
+    transactions = Transaction.objects.filter(company=company, date__range=[start_date, end_date])
     
     # Calculate totals including GST
     total_credit = 0
@@ -113,7 +126,7 @@ def dashboard_summary(request):
     
     balance = total_credit - total_debit
     
-    recent_transactions = Transaction.objects.select_related(
+    recent_transactions = Transaction.objects.filter(company=company).select_related(
         'category', 'from_vendor', 'to_vendor'
     ).order_by('-date', '-created_at')[:10]
     
@@ -130,6 +143,7 @@ def dashboard_summary(request):
 @api_view(['GET'])
 @permission_classes([IsFinanceAdminOrHR])
 def vendor_payments_report(request):
+    company = get_current_company(request)
     start_date = request.query_params.get('start_date')
     end_date = request.query_params.get('end_date')
     
@@ -137,6 +151,7 @@ def vendor_payments_report(request):
         return Response({'error': 'start_date and end_date required'}, status=400)
     
     transactions = Transaction.objects.filter(
+        company=company,
         date__range=[start_date, end_date]
     ).values('to_vendor__name').annotate(
         total_paid=Sum('debit_amount')
@@ -148,6 +163,7 @@ def vendor_payments_report(request):
 @api_view(['GET'])
 @permission_classes([IsFinanceAdminOrHR])
 def expense_summary_report(request):
+    company = get_current_company(request)
     start_date = request.query_params.get('start_date')
     end_date = request.query_params.get('end_date')
     
@@ -155,6 +171,7 @@ def expense_summary_report(request):
         return Response({'error': 'start_date and end_date required'}, status=400)
     
     expenses = Transaction.objects.filter(
+        company=company,
         date__range=[start_date, end_date],
         debit_amount__gt=0
     ).values('category__name').annotate(
@@ -167,6 +184,7 @@ def expense_summary_report(request):
 @api_view(['GET'])
 @permission_classes([IsFinanceAdminOrHR])
 def gst_transactions_report(request):
+    company = get_current_company(request)
     start_date = request.query_params.get('start_date')
     end_date = request.query_params.get('end_date')
     
@@ -174,6 +192,7 @@ def gst_transactions_report(request):
         return Response({'error': 'start_date and end_date required'}, status=400)
     
     transactions = Transaction.objects.filter(
+        company=company,
         date__range=[start_date, end_date],
         gst_applicable=True
     ).select_related('category', 'from_vendor', 'to_vendor')
@@ -184,6 +203,7 @@ def gst_transactions_report(request):
 @api_view(['GET'])
 @permission_classes([IsFinanceAdminOrHR])
 def monthly_report(request):
+    company = get_current_company(request)
     year = int(request.query_params.get('year', datetime.now().year))
     month = int(request.query_params.get('month', datetime.now().month))
     
@@ -195,7 +215,7 @@ def monthly_report(request):
     else:
         end_date = f"{year}-{month+1:02d}-01"
     
-    transactions = Transaction.objects.filter(date__range=[start_date, end_date])
+    transactions = Transaction.objects.filter(company=company, date__range=[start_date, end_date])
     
     # Calculate totals including GST
     total_credit = 0

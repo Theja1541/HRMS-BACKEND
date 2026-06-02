@@ -13,7 +13,7 @@ from .models import Attendance
 from apps.holidays.models import Holiday
 from .constants import ATTENDANCE_STATUS_CHOICES
 from .serializers import AttendanceSerializer
-from apps.accounts.permissions import IsEmployee, IsHR
+from apps.accounts.permissions import IsEmployee, IsHR, check_company_module_permission
 from apps.employees.models import Employee
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -455,6 +455,9 @@ def calculate_attendance_status(employee, check_in_time):
 @api_view(["POST"])
 @permission_classes([IsHR])
 def mark_attendance(request):
+    if not check_company_module_permission(request, "attendance", "edit", page_name="attendance"):
+        return Response({"error": "Edit action is disabled in Attendance for this company."}, status=status.HTTP_403_FORBIDDEN)
+
     employee_id = request.data.get("employee_id")
     date_value = request.data.get("date")  # YYYY-MM-DD
     status_value = request.data.get("status")  # PRESENT / ABSENT / LEAVE etc.
@@ -623,6 +626,9 @@ def mark_attendance(request):
 @api_view(["POST"])
 @permission_classes([IsHR])
 def bulk_mark_attendance(request):
+    if not check_company_module_permission(request, "attendance", "edit", page_name="attendance"):
+        return Response({"error": "Edit action is disabled in Attendance for this company."}, status=status.HTTP_403_FORBIDDEN)
+
     date_value = request.data.get("date")
     status_value = request.data.get("status")
     edit_reason = request.data.get("edit_reason") or "Bulk applied from Daily Attendance"
@@ -817,6 +823,9 @@ def export_my_attendance(request):
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
 def send_attendance_now(request):
+    if not check_company_module_permission(request, "attendance", "create", page_name="attendance"):
+        return Response({"error": "Create/Send action is disabled in Attendance for this company."}, status=status.HTTP_403_FORBIDDEN)
+
     year = request.data.get("year")
     month = request.data.get("month")
 
@@ -832,6 +841,8 @@ def send_attendance_now(request):
 @api_view(["POST"])
 @permission_classes([IsHR])
 def generate_today_attendance(request):
+    if not check_company_module_permission(request, "attendance", "create", page_name="attendance"):
+        return Response({"error": "Create action is disabled in Attendance for this company."}, status=status.HTTP_403_FORBIDDEN)
 
     today = timezone.now().date()
     if is_payroll_closed(today.year, today.month) and not is_super_admin(request.user):
@@ -970,14 +981,21 @@ def dashboard_summary(request):
     from django.db.models import Count, Q
     from apps.employees.models import Employee
     from apps.attendance.models import Attendance
+    from apps.accounts.tenant_utils import get_current_company
     
+    company = get_current_company(request)
     today = timezone.localdate()
     
     # Total active employees
-    total_employees = Employee.objects.filter(user__is_active=True).count()
+    employee_qs = Employee.objects.filter(user__is_active=True)
+    if company is not None:
+        employee_qs = employee_qs.filter(user__company=company)
+    total_employees = employee_qs.count()
     
     # Today's attendance
     today_attendance = Attendance.objects.filter(date=today)
+    if company is not None:
+        today_attendance = today_attendance.filter(employee__user__company=company)
     
     present_today = today_attendance.filter(status="PRESENT").count()
     absent_today = today_attendance.filter(status="ABSENT").count()
@@ -992,14 +1010,16 @@ def dashboard_summary(request):
     last_7_days = [today - timedelta(days=i) for i in range(6, -1, -1)]
     trend_data = []
     
-    weekly_attendance = Attendance.objects.filter(
-        date__in=last_7_days
-    ).values('date').annotate(
+    weekly_attendance = Attendance.objects.filter(date__in=last_7_days)
+    if company is not None:
+        weekly_attendance = weekly_attendance.filter(employee__user__company=company)
+        
+    weekly_attendance_summary = weekly_attendance.values('date').annotate(
         present=Count('id', filter=Q(status='PRESENT')),
         absent=Count('id', filter=Q(status='ABSENT'))
     )
     
-    trend_dict = {item['date'].strftime('%Y-%m-%d'): item for item in weekly_attendance}
+    trend_dict = {item['date'].strftime('%Y-%m-%d'): item for item in weekly_attendance_summary}
     
     for d in last_7_days:
         date_str = d.strftime('%Y-%m-%d')

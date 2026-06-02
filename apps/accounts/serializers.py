@@ -3,7 +3,6 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .models import User, Company
-from apps.billing.models import Payment
 from apps.superadmin.services import (
     get_int_setting,
     validate_password_against_settings,
@@ -17,6 +16,9 @@ class CompanySerializer(serializers.ModelSerializer):
     pricing_plan_name = serializers.SerializerMethodField()
     pricing_plan_price_monthly = serializers.SerializerMethodField()
     subscription_period_start = serializers.SerializerMethodField()
+    admin_email = serializers.SerializerMethodField()
+    admin_first_name = serializers.SerializerMethodField()
+    admin_last_name = serializers.SerializerMethodField()
     # pricing_plan and logo fields were removed from the Company model in recent migrations.
     # Keep only fields that exist on the model and computed `employee_count`.
 
@@ -48,6 +50,9 @@ class CompanySerializer(serializers.ModelSerializer):
             "bank_account_no",
             "bank_ifsc",
             "bank_branch",
+            "admin_email",
+            "admin_first_name",
+            "admin_last_name",
         ]
         read_only_fields = [
             "created_at",
@@ -65,12 +70,12 @@ class CompanySerializer(serializers.ModelSerializer):
             return obj.logo.url
         return None
 
-    def _latest_pricing_payment(self, company):
-        # Return the most recent Payment that references a pricing_plan for this company
+    def _latest_subscription(self, company):
         try:
+            from apps.billing.models import CompanySubscription
             return (
-                Payment.objects.select_related("pricing_plan")
-                .filter(company=company, pricing_plan__isnull=False)
+                CompanySubscription.objects.select_related("subscription_plan")
+                .filter(company=company)
                 .order_by("-created_at")
                 .first()
             )
@@ -78,25 +83,39 @@ class CompanySerializer(serializers.ModelSerializer):
             return None
 
     def get_pricing_plan_id(self, obj):
-        p = self._latest_pricing_payment(obj)
-        return p.pricing_plan.id if p and p.pricing_plan else None
+        s = self._latest_subscription(obj)
+        return s.subscription_plan.id if s and s.subscription_plan else None
 
     def get_pricing_plan_name(self, obj):
-        p = self._latest_pricing_payment(obj)
-        return p.pricing_plan.name if p and p.pricing_plan else None
+        s = self._latest_subscription(obj)
+        return s.subscription_plan.name if s and s.subscription_plan else None
 
     def get_pricing_plan_price_monthly(self, obj):
-        p = self._latest_pricing_payment(obj)
-        if p and p.pricing_plan:
-            return str(p.pricing_plan.price_monthly)
+        s = self._latest_subscription(obj)
+        if s and s.subscription_plan:
+            return str(s.subscription_plan.monthly_price)
         return None
 
     def get_subscription_period_start(self, obj):
-        # We don't store subscription_period_start on Company; infer from latest payment_date if present
-        p = self._latest_pricing_payment(obj)
-        if p and p.payment_date:
-            return p.payment_date.isoformat()
+        s = self._latest_subscription(obj)
+        if s and s.start_date:
+            return s.start_date.isoformat()
         return None
+
+    def _get_admin_user(self, obj):
+        return User.objects.filter(company=obj, role="ADMIN").first()
+
+    def get_admin_email(self, obj):
+        u = self._get_admin_user(obj)
+        return u.email if u else None
+
+    def get_admin_first_name(self, obj):
+        u = self._get_admin_user(obj)
+        return u.first_name if u else None
+
+    def get_admin_last_name(self, obj):
+        u = self._get_admin_user(obj)
+        return u.last_name if u else None
 from .services.temporary_passwords import (
     TemporaryPasswordConsumedError,
     TemporaryPasswordExpiredError,
@@ -115,7 +134,11 @@ class CreateUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["username", "email", "password", "role", "first_name", "last_name"]
+        fields = [
+            "username", "email", "password", "role", "first_name", "last_name", "hr_permissions",
+            "phone", "employee_id", "profile_photo", "resume", "offer_letter", "aadhar_card", "pan_card",
+            "address_proof", "education_certificate", "experience_certificate", "hr_details"
+        ]
 
     def validate(self, attrs):
         role = str(attrs.get("role") or "").upper().strip()
@@ -201,6 +224,19 @@ class UserSerializer(serializers.ModelSerializer):
             "is_locked",
             "is_active",
             "date_joined",
+            "hr_permissions",
+            "employee_id",
+            "profile_photo",
+            "resume",
+            "offer_letter",
+            "aadhar_card",
+            "pan_card",
+            "address_proof",
+            "education_certificate",
+            "experience_certificate",
+            "failed_attempts",
+            "last_login",
+            "hr_details",
         ]
 
     def get_company_name(self, obj):

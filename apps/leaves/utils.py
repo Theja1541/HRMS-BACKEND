@@ -1,3 +1,4 @@
+from datetime import timedelta
 from apps.attendance.models import Attendance
 from apps.holidays.models import Holiday
 
