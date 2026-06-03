@@ -51,6 +51,7 @@ from apps.superadmin.services import (
     is_password_expired,
     validate_password_against_settings,
     get_int_setting,
+    get_bool_setting,
 )
 
 
@@ -242,15 +243,10 @@ def login_view(request):
     user = serializer.validated_data["user"]
     temporary_password_record = serializer.validated_data.get("temporary_password_record")
 
-    # ─── Check MFA requirement (lazy import to avoid circular) ───
+    # ─── Check MFA requirement ───
     mfa_required = False
-    try:
-        from apps.superadmin.views import _is_mfa_required
-        # MFA applies to non-Super-Admin users only
-        if user.role != "SUPER_ADMIN":
-            mfa_required = _is_mfa_required()
-    except Exception:
-        mfa_required = False
+    if user.role != "SUPER_ADMIN":
+        mfa_required = get_bool_setting("require_mfa", False)
 
     if mfa_required:
         # Don't issue tokens yet — tell frontend to show OTP screen

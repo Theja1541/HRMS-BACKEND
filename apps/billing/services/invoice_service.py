@@ -159,15 +159,19 @@ class InvoiceService:
 
         platform_name = get_setting("platform_name", "HRMS SaaS Platforms Ltd")
         platform_address = get_setting("platform_address", "Sector 62, Noida, Uttar Pradesh, 201301")
+        platform_state = get_setting("platform_state", "Uttar Pradesh")
         platform_gstin = get_setting("platform_gstin", "09AAAAA1111A1Z1 (Uttar Pradesh)")
         platform_email = get_setting("support_email", "support@hrmsaas.com")
+        platform_phone = get_setting("platform_phone", "06301989372")
 
         seller_details = (
             f"<b>SOLD BY:</b><br/>"
             f"{platform_name}<br/>"
             f"{platform_address}<br/>"
+            f"<b>State:</b> {platform_state}<br/>"
             f"<b>GSTIN:</b> {platform_gstin}<br/>"
-            f"<b>Email:</b> {platform_email}"
+            f"<b>Email:</b> {platform_email}<br/>"
+            f"<b>Phone:</b> {platform_phone}"
         )
 
         buyer_details = (
@@ -278,7 +282,7 @@ class InvoiceService:
             "<b>Terms & Conditions:</b><br/>"
             "1. This is a computer-generated GST invoice and requires no physical signature.<br/>"
             "2. Subscription fees are billed in advance and are non-refundable.<br/>"
-            "3. For billing disputes, please contact billing@hrmsaas.com within 7 days of receipt.<br/>"
+            f"3. For billing disputes, please contact {platform_email} within 7 days of receipt.<br/>"
             "<br/><br/>"
             "<center>Thank you for choosing HRMS SaaS! We appreciate your business.</center>"
         )

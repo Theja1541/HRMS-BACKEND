@@ -42,6 +42,7 @@ class CompanySerializer(serializers.ModelSerializer):
             "billing_action_stopped",
             "logo_url",
             "enabled_modules",
+            "email",
             "address",
             "phone",
             "gstin",

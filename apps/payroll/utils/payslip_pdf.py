@@ -77,7 +77,11 @@ def generate_payslip_pdf(payslip):
     elements = []
 
     employee = payslip.employee
-    company = getattr(employee, "company", None) or getattr(payslip, "company", None)
+    company = None
+    if getattr(employee, "user", None):
+        company = getattr(employee.user, "company", None)
+    if not company:
+        company = getattr(employee, "company", None) or getattr(payslip, "company", None)
     if not company:
         from apps.accounts.models import Company
         company = Company.objects.first()

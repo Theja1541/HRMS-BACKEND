@@ -32,10 +32,18 @@ from .services import (
 
 DEFAULT_SETTINGS = [
     # General
-    {"key": "platform_name", "value": "HRMS Platform", "label": "Platform Name",
-     "description": "Name displayed across the platform UI.", "category": "general", "value_type": "string"},
-    {"key": "support_email", "value": "support@hrms.com", "label": "Support Email",
-     "description": "Contact email shown to users.", "category": "general", "value_type": "string"},
+    {"key": "platform_name", "value": "HRMS SaaS Platforms Ltd", "label": "Platform Name",
+     "description": "Name displayed across the platform UI and invoices.", "category": "general", "value_type": "string"},
+    {"key": "platform_address", "value": "Sector 62, Noida, Uttar Pradesh, 201301", "label": "Platform Address",
+     "description": "Physical address displayed on invoices.", "category": "general", "value_type": "string"},
+    {"key": "platform_state", "value": "Uttar Pradesh", "label": "Platform State",
+     "description": "State where platform operates from, displayed on invoices.", "category": "general", "value_type": "string"},
+    {"key": "platform_gstin", "value": "09AAAAA1111A1Z1 (Uttar Pradesh)", "label": "Platform GSTIN",
+     "description": "GSTIN displayed on invoices.", "category": "general", "value_type": "string"},
+    {"key": "platform_phone", "value": "06301989372", "label": "Platform Phone",
+     "description": "Phone number displayed on invoices.", "category": "general", "value_type": "string"},
+    {"key": "support_email", "value": "support@hrmsaas.com", "label": "Support Email",
+     "description": "Contact email shown to users and on invoices.", "category": "general", "value_type": "string"},
     {"key": "default_timezone", "value": "Asia/Kolkata", "label": "Default Timezone",
      "description": "Platform default timezone.", "category": "general", "value_type": "string"},
     {"key": "maintenance_mode", "value": "false", "label": "Maintenance Mode",
@@ -320,18 +328,24 @@ def test_smtp_email(request):
 @permission_classes([IsSuperAdmin])
 def reports_overview(request):
     """GET /api/superadmin/reports/ — Platform-wide KPI snapshot."""
+    try:
+        months_back = int(request.GET.get('months', 12))
+        if months_back < 1 or months_back > 60: months_back = 12
+    except ValueError:
+        months_back = 12
+
     today = date.today()
     thirty_days_ago = today - timedelta(days=30)
-    twelve_months_ago = today - timedelta(days=365)
+    history_start_date = today - timedelta(days=30 * months_back)
 
     def add_months(year, month, delta):
         month_index = (year * 12 + month - 1) + delta
         return month_index // 12, month_index % 12 + 1
 
-    def month_labels_for_last_12_months():
+    def month_labels_for_history():
         labels = []
-        start_year, start_month = add_months(today.year, today.month, -11)
-        for offset in range(12):
+        start_year, start_month = add_months(today.year, today.month, -(months_back - 1))
+        for offset in range(months_back):
             year, month = add_months(start_year, start_month, offset)
             labels.append(f"{year:04d}-{month:02d}")
         return labels
@@ -351,7 +365,7 @@ def reports_overview(request):
                     else values.get(label, 0)
                 ),
             }
-            for label in month_labels_for_last_12_months()
+            for label in month_labels_for_history()
         ]
 
     # ── KPI Cards ──────────────────────────────
@@ -384,10 +398,10 @@ def reports_overview(request):
         is_active=True,
     ).count()
 
-    # ── Monthly growth (12 months) ────────────
+    # ── Monthly growth (dynamic months) ────────────
     monthly_companies = list(
         Company.objects
-        .filter(created_at__date__gte=twelve_months_ago)
+        .filter(created_at__date__gte=history_start_date)
         .annotate(month=TruncMonth("created_at"))
         .values("month")
         .annotate(count=Count("id"))
@@ -395,7 +409,7 @@ def reports_overview(request):
     )
     monthly_users = list(
         User.objects
-        .filter(date_joined__date__gte=twelve_months_ago)
+        .filter(date_joined__date__gte=history_start_date)
         .annotate(month=TruncMonth("date_joined"))
         .values("month")
         .annotate(count=Count("id"))
@@ -403,7 +417,7 @@ def reports_overview(request):
     )
     monthly_revenue = list(
         PaymentTransaction.objects
-        .filter(payment_status="completed", paid_at__date__gte=twelve_months_ago)
+        .filter(payment_status="completed", paid_at__date__gte=history_start_date)
         .annotate(month=TruncMonth("paid_at"))
         .values("month")
         .annotate(total=Sum("amount"))

@@ -162,32 +162,6 @@ class Transaction(models.Model):
         return f"{self.date} - {self.details[:50]}"
 
 
-def seed_default_categories_for_company(company):
-    DEFAULT_CATEGORIES = [
-        ("Rent", "EXPENSE"),
-        ("Salaries", "EXPENSE"),
-        ("Utility Bills", "EXPENSE"),
-        ("Software & Subscriptions", "EXPENSE"),
-        ("Office Supplies", "EXPENSE"),
-        ("Travel & Lodging", "EXPENSE"),
-        ("Marketing & Advertising", "EXPENSE"),
-        ("Miscellaneous Expense", "EXPENSE"),
-        ("Client Billing", "INCOME"),
-        ("Product Sales", "INCOME"),
-        ("Consulting Services", "INCOME"),
-        ("Interest Income", "INCOME"),
-        ("Other Income", "INCOME"),
-    ]
-    created = []
-    for name, cat_type in DEFAULT_CATEGORIES:
-        obj, created_new = Category.objects.get_or_create(
-            company=company,
-            name=name,
-            defaults={"category_type": cat_type}
-        )
-        if created_new:
-            created.append(obj)
-    return created
 
 class TransactionItem(models.Model):
     transaction = models.ForeignKey(Transaction, on_delete=models.CASCADE, related_name="items")

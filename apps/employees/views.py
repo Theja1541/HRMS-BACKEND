@@ -874,6 +874,8 @@ def employee_dashboard(request):
     # ==============================
     # 2️⃣ ATTENDANCE PERCENTAGE
     # ==============================
+    # 2. ATTENDANCE RATE
+    # ==============================
     year = today.year
     month = today.month
 
@@ -883,17 +885,21 @@ def employee_dashboard(request):
         date__month=month
     )
 
-    total_present = attendance_records.filter(
-        status__in=["PRESENT", "PAID_LEAVE"]
-    ).count()
+    from apps.attendance.views import calculate_working_days
+    working_days, _, _ = calculate_working_days(year, month, employee=employee)
 
-    total_days = attendance_records.count()
+    past_records = attendance_records.filter(date__lte=today)
+    
+    total_present_past = past_records.filter(status__in=["PRESENT", "PAID_LEAVE"]).count()
+    half_days_past = past_records.filter(status="HALF_DAY").count()
+    
+    past_payable = total_present_past + (half_days_past * 0.5)
 
     attendance_percentage = 0
 
-    if total_days > 0:
+    if working_days > 0:
         attendance_percentage = round(
-            (total_present / total_days) * 100,
+            (past_payable / working_days) * 100,
             2
         )
 

@@ -40,6 +40,9 @@ class RazorpayService:
             return order
         except Exception as e:
             logger.error(f"Error creating Razorpay order: {str(e)}")
+            if settings.DEBUG and "Authentication failed" in str(e):
+                import uuid
+                return {"id": f"mock_order_{uuid.uuid4().hex[:8]}"}
             raise e
 
     def create_razorpay_plan(self, name, price_inr, period="monthly", description=""):
@@ -64,6 +67,9 @@ class RazorpayService:
             return rzp_plan.get("id")
         except Exception as e:
             logger.error(f"Error creating Razorpay plan: {str(e)}")
+            if settings.DEBUG and "Authentication failed" in str(e):
+                import uuid
+                return f"mock_plan_{uuid.uuid4().hex[:8]}"
             raise e
 
     def create_razorpay_subscription(self, plan_id, trial_days=0):
@@ -87,6 +93,9 @@ class RazorpayService:
             return rzp_sub
         except Exception as e:
             logger.error(f"Error creating Razorpay subscription: {str(e)}")
+            if settings.DEBUG and "Authentication failed" in str(e):
+                import uuid
+                return {"id": f"mock_sub_{uuid.uuid4().hex[:8]}"}
             raise e
 
     def verify_payment_signature(self, razorpay_order_id, razorpay_payment_id, razorpay_signature):

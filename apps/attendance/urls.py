@@ -26,7 +26,7 @@ urlpatterns = [
     path("mark/", views.mark_attendance),
     path("bulk-mark/", views.bulk_mark_attendance, name="bulk-mark"),
     path("unlock/", views.unlock_attendance, name="unlock"),
-    path("my-attendance/export/", views.export_my_attendance, name="export-my-attendance"),
+    path("export-my-attendance/", views.export_my_attendance, name="export-my-attendance"),
     
     # 🌟 Generate & Notify API
     path('generate-today/', views.generate_today_attendance, name='generate-today'),

@@ -55,6 +55,7 @@ from apps.payroll.utils.payroll_helpers import (
     is_payroll_closed,
     is_super_admin,
 )
+from django.db import transaction
 
 # ============================================================
 # COMMON UTIL
@@ -300,11 +301,20 @@ def my_attendance(request):
         + absent_days
     )
 
+    # Calculate accurate attendance percentage up to today
+    today = timezone.now().date()
+    past_summary = records.filter(date__lte=today).aggregate(
+        present=Count("id", filter=Q(status="PRESENT")),
+        half_day=Count("id", filter=Q(status="HALF_DAY")),
+        paid_leave=Count("id", filter=Q(status="PAID_LEAVE")),
+    )
+    past_payable_days = (past_summary["present"] or 0) + ((past_summary["half_day"] or 0) * 0.5) + (past_summary["paid_leave"] or 0)
+
     attendance_percentage = 0
 
     if working_days > 0:
         attendance_percentage = round(
-            (payable_days / working_days) * 100,
+            (past_payable_days / working_days) * 100,
             2
         )
 
@@ -821,7 +831,7 @@ def export_my_attendance(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsHR])
 def send_attendance_now(request):
     if not check_company_module_permission(request, "attendance", "create", page_name="attendance"):
         return Response({"error": "Create/Send action is disabled in Attendance for this company."}, status=status.HTTP_403_FORBIDDEN)
