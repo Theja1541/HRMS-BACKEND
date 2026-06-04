@@ -753,6 +753,25 @@ def superadmin_unlock_user(request, user_id):
     return Response({"message": "User unlocked", "is_locked": False})
 
 
+@api_view(["POST"])
+@permission_classes([IsSuperAdmin | IsCompanyAdminOrHR])
+def superadmin_reset_attempts(request, user_id):
+    user = get_object_or_404(User, id=user_id)
+
+    if getattr(request.user, "role", "").upper() != "SUPER_ADMIN":
+        if getattr(user, "company_id", None) != getattr(request.user, "company_id", None):
+            return Response(
+                {"detail": "You can only reset attempts for users belonging to your company."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+    user.failed_attempts = 0
+    user.is_locked = False
+    user.locked_at = None
+    user.save(update_fields=["failed_attempts", "is_locked", "locked_at"])
+    return Response({"message": "User login attempts reset successfully", "failed_attempts": 0, "is_locked": False})
+
+
 # =========================================================
 # 🔑 CHANGE PASSWORD
 # =========================================================

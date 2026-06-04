@@ -54,6 +54,10 @@ class CompanySerializer(serializers.ModelSerializer):
             "admin_email",
             "admin_first_name",
             "admin_last_name",
+            "max_login_attempts",
+            "min_password_length",
+            "password_expiry_days",
+            "require_mfa",
         ]
         read_only_fields = [
             "created_at",
@@ -177,7 +181,12 @@ class CreateUserSerializer(serializers.ModelSerializer):
                 {"password": "Password is required for this role."}
             )
 
-        password_error = validate_password_against_settings(password)
+        company = None
+        request = self.context.get("request")
+        if request and hasattr(request, "user") and hasattr(request.user, "company"):
+            company = request.user.company
+
+        password_error = validate_password_against_settings(password, company=company)
         if password_error:
             raise serializers.ValidationError(
                 {"password": password_error}
@@ -298,9 +307,9 @@ class LoginSerializer(serializers.Serializer):
         if not authenticated_user:
             user.failed_attempts += 1
 
-            max_failed_attempts = get_int_setting(
-                "max_login_attempts", 5, minimum=0
-            )
+            max_failed_attempts = 5
+            if getattr(user, 'company', None):
+                max_failed_attempts = getattr(user.company, 'max_login_attempts', 5)
             if max_failed_attempts > 0 and user.failed_attempts >= max_failed_attempts:
                 user.is_locked = True
                 user.locked_at = timezone.now()
@@ -312,6 +321,20 @@ class LoginSerializer(serializers.Serializer):
             )
 
         if not user.is_active:
+            # Check if this is due to an approved resignation
+            try:
+                from apps.separation.models import ResignationRequest
+                resignation = ResignationRequest.objects.filter(
+                    employee__user=user, 
+                    status__in=['HR_APPROVED', 'RELIEVED', 'SETTLEMENT_PENDING', 'READY_FOR_RELIEVING']
+                ).first()
+                if resignation:
+                    raise serializers.ValidationError(
+                        {"detail": "Resignation has approved employees are unable to login."}
+                    )
+            except Exception:
+                pass
+                
             raise serializers.ValidationError(
                 {"detail": "User is inactive"}
             )

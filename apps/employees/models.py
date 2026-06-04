@@ -61,9 +61,25 @@ class Employee(models.Model):
     work_location = models.CharField(max_length=100, blank=True)
     reporting_manager = models.CharField(max_length=100, blank=True)
 
+    EMPLOYMENT_STATUS_CHOICES = (
+        ('ACTIVE', 'Active'),
+        ('ONBOARDING', 'Onboarding'),
+        ('PROBATION', 'Probation'),
+        ('NOTICE_PERIOD', 'Notice Period'),
+        ('RELIEVED', 'Relieved'),
+        ('TERMINATED', 'Terminated'),
+        ('RETIRED', 'Retired'),
+    )
+
+    employment_status = models.CharField(
+        max_length=20,
+        choices=EMPLOYMENT_STATUS_CHOICES,
+        default='ACTIVE',
+        db_index=True
+    )
+
     # Soft delete
     is_active = models.BooleanField(default=True)
-
     # ============================================================
     # SALARY STRUCTURE
     # ============================================================

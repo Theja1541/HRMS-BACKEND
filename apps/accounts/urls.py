@@ -15,6 +15,7 @@ from .views import (
     superadmin_reset_password,
     superadmin_block_user,
     superadmin_unlock_user,
+    superadmin_reset_attempts,
     superadmin_analytics,
     company_list,
     company_create,
@@ -54,6 +55,7 @@ urlpatterns = [
     path("users/<int:user_id>/reset-password/", superadmin_reset_password, name="superadmin-reset-password"),
     path("users/<int:user_id>/block/", superadmin_block_user, name="superadmin-block-user"),
     path("users/<int:user_id>/unlock/", superadmin_unlock_user, name="superadmin-unlock-user"),
+    path("users/<int:user_id>/reset-attempts/", superadmin_reset_attempts, name="superadmin-reset-attempts"),
 
     path("companies/", company_list),  # GET list
     path("companies/create/", company_create),  # POST create

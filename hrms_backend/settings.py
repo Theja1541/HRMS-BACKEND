@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'apps.notifications.apps.NotificationsConfig',
     "apps.support.apps.SupportConfig",
     "apps.superadmin.apps.SuperadminConfig",
+    "apps.separation.apps.SeparationConfig",
 ]
 
 MIDDLEWARE = [
