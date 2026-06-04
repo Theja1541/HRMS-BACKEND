@@ -51,6 +51,7 @@ from apps.superadmin.services import (
     is_password_expired,
     validate_password_against_settings,
     get_int_setting,
+    get_bool_setting,
 )
 
 
@@ -242,15 +243,10 @@ def login_view(request):
     user = serializer.validated_data["user"]
     temporary_password_record = serializer.validated_data.get("temporary_password_record")
 
-    # ─── Check MFA requirement (lazy import to avoid circular) ───
+    # ─── Check MFA requirement ───
     mfa_required = False
-    try:
-        from apps.superadmin.views import _is_mfa_required
-        # MFA applies to non-Super-Admin users only
-        if user.role != "SUPER_ADMIN":
-            mfa_required = _is_mfa_required()
-    except Exception:
-        mfa_required = False
+    if user.role != "SUPER_ADMIN":
+        mfa_required = get_bool_setting("require_mfa", False)
 
     if mfa_required:
         # Don't issue tokens yet — tell frontend to show OTP screen
@@ -755,6 +751,25 @@ def superadmin_unlock_user(request, user_id):
     user.locked_at = None
     user.save(update_fields=["is_locked", "failed_attempts", "locked_at"])
     return Response({"message": "User unlocked", "is_locked": False})
+
+
+@api_view(["POST"])
+@permission_classes([IsSuperAdmin | IsCompanyAdminOrHR])
+def superadmin_reset_attempts(request, user_id):
+    user = get_object_or_404(User, id=user_id)
+
+    if getattr(request.user, "role", "").upper() != "SUPER_ADMIN":
+        if getattr(user, "company_id", None) != getattr(request.user, "company_id", None):
+            return Response(
+                {"detail": "You can only reset attempts for users belonging to your company."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+    user.failed_attempts = 0
+    user.is_locked = False
+    user.locked_at = None
+    user.save(update_fields=["failed_attempts", "is_locked", "locked_at"])
+    return Response({"message": "User login attempts reset successfully", "failed_attempts": 0, "is_locked": False})
 
 
 # =========================================================

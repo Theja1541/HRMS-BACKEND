@@ -31,13 +31,7 @@ class CategoryViewSet(TenantQuerysetMixin, viewsets.ModelViewSet):
     ordering_fields = ['name', 'created_at']
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        company = get_current_company(self.request)
-        if company and not qs.filter(company=company).exists():
-            from .models import seed_default_categories_for_company
-            seed_default_categories_for_company(company)
-            qs = super().get_queryset()
-        return qs
+        return super().get_queryset()
 
 
 class TransactionViewSet(TenantQuerysetMixin, viewsets.ModelViewSet):

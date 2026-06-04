@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'apps.notifications.apps.NotificationsConfig',
     "apps.support.apps.SupportConfig",
     "apps.superadmin.apps.SuperadminConfig",
+    "apps.separation.apps.SeparationConfig",
 ]
 
 MIDDLEWARE = [
@@ -152,6 +153,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -269,3 +271,6 @@ CHANNEL_LAYERS = {
     },
 }
 
+
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")

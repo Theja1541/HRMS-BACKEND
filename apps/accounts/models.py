@@ -88,15 +88,21 @@ class Company(models.Model):
     company_code = models.CharField(max_length=50, unique=True, help_text="Unique code or short identifier for the company")
     domain = models.CharField(max_length=255, blank=True, null=True, help_text="Custom domain or subdomain for white-labeling")
     logo = models.ImageField(upload_to="company_logos/", null=True, blank=True)
+    email = models.EmailField(blank=True, null=True, help_text="Company contact email")
     address = models.TextField(blank=True, default="")
     phone = models.CharField(max_length=20, blank=True, default="")
     gstin = models.CharField(max_length=50, blank=True, default="")
     state = models.CharField(max_length=100, blank=True, default="")
-    state_code = models.CharField(max_length=10, blank=True, default="")
+    state_code = models.CharField(max_length=100, blank=True, default="")
     bank_account_no = models.CharField(max_length=50, blank=True, default="")
     bank_ifsc = models.CharField(max_length=20, blank=True, default="")
     bank_branch = models.CharField(max_length=100, blank=True, default="")
     
+    # Security Settings
+    max_login_attempts = models.IntegerField(default=5, help_text="Account locks after this many failed logins. 0 to disable.")
+    min_password_length = models.IntegerField(default=8, help_text="Minimum characters required for passwords.")
+    password_expiry_days = models.IntegerField(default=90, help_text="Force password reset after this many days (0 = never).")
+    require_mfa = models.BooleanField(default=False, help_text="Enforce Multi-Factor Authentication for all users.")
 
     is_active = models.BooleanField(default=True, db_index=True)
     billing_action_stopped = models.BooleanField(default=False, db_index=True)

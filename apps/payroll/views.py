@@ -1669,7 +1669,7 @@ def download_all_payslips_zip(request):
     payslips = Payslip.objects.filter(
         month__year=month_date.year,
         month__month=month_date.month,
-        status="APPROVED"
+        status__in=["APPROVED", "PAID"]
     )
 
     buffer = io.BytesIO()
@@ -2626,11 +2626,11 @@ def payroll_summary(request):
 
     if request.user.role == "SUPER_ADMIN":
         if company_id:
-            payslips = payslips.filter(company_id=company_id)
+            payslips = payslips.filter(employee__user__company_id=company_id)
     else:
         company = get_current_company(request)
-        if company and hasattr(payslips.model, 'company'):
-            payslips = payslips.filter(company=company)
+        if company:
+            payslips = payslips.filter(employee__user__company=company)
 
     if year and month:
         payslips = payslips.filter(

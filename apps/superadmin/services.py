@@ -84,28 +84,26 @@ def get_effective_settings_payload(company=None):
         },
         "company_enabled_modules": company.enabled_modules if company else {},
         "security": {
-            "require_mfa": get_bool_setting("require_mfa", False),
-            "min_password_length": get_int_setting("min_password_length", 8, minimum=1),
-            "max_login_attempts": get_int_setting("max_login_attempts", 5, minimum=0),
+            "require_mfa": company.require_mfa if company else False,
+            "min_password_length": company.min_password_length if company else 8,
+            "max_login_attempts": company.max_login_attempts if company else 5,
             "session_timeout_minutes": get_int_setting(
                 "session_timeout_minutes", 60, minimum=1, maximum=525600
             ),
-            "password_expiry_days": get_int_setting(
-                "password_expiry_days", 90, minimum=0
-            ),
+            "password_expiry_days": company.password_expiry_days if company else 90,
         },
     }
 
 
-def validate_password_against_settings(password):
-    min_length = get_int_setting("min_password_length", 8, minimum=1)
+def validate_password_against_settings(password, company=None):
+    min_length = company.min_password_length if company else 8
     if len(password or "") < min_length:
         return f"Password must be at least {min_length} characters."
     return None
 
 
 def is_password_expired(user):
-    days = get_int_setting("password_expiry_days", 90, minimum=0)
+    days = user.company.password_expiry_days if getattr(user, 'company', None) else 90
     if days <= 0:
         return False
     changed_at = getattr(user, "password_changed_at", None) or getattr(

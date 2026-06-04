@@ -64,6 +64,7 @@ urlpatterns = [
     path("api/support/", include("apps.support.urls")),
     path("api/holidays/", include("apps.holidays.urls")),
     path("api/superadmin/", include("apps.superadmin.urls")),
+    path("api/separation/", include("apps.separation.urls")),
 
     path("api/accounts/token/refresh/", custom_token_refresh),
 ]
