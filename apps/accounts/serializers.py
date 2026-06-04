@@ -330,7 +330,7 @@ class LoginSerializer(serializers.Serializer):
                 ).first()
                 if resignation:
                     raise serializers.ValidationError(
-                        {"detail": "Resignation has approved employees are unable to login."}
+                        {"detail": "Employee is separated from this company"}
                     )
             except Exception:
                 pass

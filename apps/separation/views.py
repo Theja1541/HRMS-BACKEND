@@ -82,6 +82,11 @@ class ResignationRequestViewSet(BaseCompanyViewSet):
             resignation.status = 'RELIEVED'
         else:
             resignation.status = 'REJECTED'
+            # Reactivate user in case they were previously deactivated (e.g. by an accidental HR approval)
+            if hasattr(resignation.employee, 'user') and resignation.employee.user:
+                u = resignation.employee.user
+                u.is_active = True
+                u.save()
         
         # Append to approval history
         history = list(resignation.approval_history)

@@ -248,6 +248,8 @@ class CustomRole(models.Model):
         blank=True,
         related_name="custom_roles",
     )
+    description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -264,6 +266,8 @@ class CustomDepartment(models.Model):
         blank=True,
         related_name="custom_departments",
     )
+    description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
