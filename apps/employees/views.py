@@ -558,20 +558,31 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
 
         if request.method == "GET":
             designations = base_employees.values_list("designation", flat=True).distinct()
-            custom_roles = CustomRole.objects.filter(company=company).values_list("name", flat=True) if company else CustomRole.objects.values_list("name", flat=True)
-            all_roles = list(set(list(designations) + list(custom_roles)))
-            all_roles.sort()
-            return Response({"roles": all_roles})
+            for desig in designations:
+                if desig:
+                    CustomRole.objects.get_or_create(company=company, name=desig, defaults={"company": company, "is_active": True})
+            
+            roles_qs = CustomRole.objects.filter(company=company) if company else CustomRole.objects.all()
+            data = [{"id": r.id, "name": r.name, "description": r.description, "is_active": r.is_active} for r in roles_qs]
+            data.sort(key=lambda x: x["name"])
+            return Response({"roles": data})
 
         elif request.method == "POST":
             role = request.data.get("role", "").strip()
+            description = request.data.get("description", "").strip()
             if not role:
                 return Response({"error": "Role name required"}, status=400)
-            CustomRole.objects.get_or_create(company=company, name=role, defaults={"company": company})
+            obj, created = CustomRole.objects.get_or_create(company=company, name=role, defaults={"company": company, "is_active": True, "description": description})
+            if not created:
+                if not obj.is_active:
+                    obj.is_active = True
+                if description:
+                    obj.description = description
+                obj.save()
             return Response({"message": "Role added successfully"})
 
-    @action(detail=False, methods=["delete"], url_path="roles/(?P<role_name>[^/.]+)")
-    def delete_role(self, request, role_name=None):
+    @action(detail=False, methods=["patch", "delete"], url_path="roles/(?P<role_id>\d+)")
+    def manage_role(self, request, role_id=None):
         from .models import CustomRole
 
         company = get_current_company(request)
@@ -584,11 +595,26 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
                 except Exception:
                     pass
 
-        qs = CustomRole.objects.filter(name=role_name)
-        if company is not None:
-            qs = qs.filter(company=company)
-        qs.delete()
-        return Response({"message": "Role deleted successfully"})
+        try:
+            role_obj = CustomRole.objects.get(id=role_id)
+        except CustomRole.DoesNotExist:
+            return Response({"error": "Role not found"}, status=404)
+            
+        if company is not None and role_obj.company != company:
+            return Response({"error": "Unauthorized"}, status=403)
+
+        if request.method == "DELETE":
+            role_obj.delete()
+            return Response({"message": "Role deleted successfully"})
+        elif request.method == "PATCH":
+            if "name" in request.data:
+                role_obj.name = request.data["name"].strip()
+            if "description" in request.data:
+                role_obj.description = request.data["description"].strip()
+            if "is_active" in request.data:
+                role_obj.is_active = request.data["is_active"]
+            role_obj.save()
+            return Response({"id": role_obj.id, "name": role_obj.name, "description": role_obj.description, "is_active": role_obj.is_active})
 
     @action(detail=False, methods=["get", "post"])
     def departments(self, request):
@@ -610,20 +636,31 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
 
         if request.method == "GET":
             departments = base_employees.values_list("department", flat=True).distinct()
-            custom_departments = CustomDepartment.objects.filter(company=company).values_list("name", flat=True) if company else CustomDepartment.objects.values_list("name", flat=True)
-            all_departments = list(set(list(departments) + list(custom_departments)))
-            all_departments.sort()
-            return Response({"departments": all_departments})
+            for dept in departments:
+                if dept:
+                    CustomDepartment.objects.get_or_create(company=company, name=dept, defaults={"company": company, "is_active": True})
+            
+            depts_qs = CustomDepartment.objects.filter(company=company) if company else CustomDepartment.objects.all()
+            data = [{"id": d.id, "name": d.name, "description": d.description, "is_active": d.is_active} for d in depts_qs]
+            data.sort(key=lambda x: x["name"])
+            return Response({"departments": data})
 
         elif request.method == "POST":
             department = request.data.get("department", "").strip()
+            description = request.data.get("description", "").strip()
             if not department:
                 return Response({"error": "Department name required"}, status=400)
-            CustomDepartment.objects.get_or_create(company=company, name=department, defaults={"company": company})
+            obj, created = CustomDepartment.objects.get_or_create(company=company, name=department, defaults={"company": company, "is_active": True, "description": description})
+            if not created:
+                if not obj.is_active:
+                    obj.is_active = True
+                if description:
+                    obj.description = description
+                obj.save()
             return Response({"message": "Department added successfully"})
 
-    @action(detail=False, methods=["delete"], url_path="departments/(?P<department_name>[^/.]+)")
-    def delete_department(self, request, department_name=None):
+    @action(detail=False, methods=["patch", "delete"], url_path="departments/(?P<dept_id>\d+)")
+    def manage_department(self, request, dept_id=None):
         from .models import CustomDepartment
 
         company = get_current_company(request)
@@ -636,11 +673,26 @@ class EmployeeViewSet(TenantMixin, ModelViewSet):
                 except Exception:
                     pass
 
-        qs = CustomDepartment.objects.filter(name=department_name)
-        if company is not None:
-            qs = qs.filter(company=company)
-        qs.delete()
-        return Response({"message": "Department deleted successfully"})
+        try:
+            dept_obj = CustomDepartment.objects.get(id=dept_id)
+        except CustomDepartment.DoesNotExist:
+            return Response({"error": "Department not found"}, status=404)
+            
+        if company is not None and dept_obj.company != company:
+            return Response({"error": "Unauthorized"}, status=403)
+
+        if request.method == "DELETE":
+            dept_obj.delete()
+            return Response({"message": "Department deleted successfully"})
+        elif request.method == "PATCH":
+            if "name" in request.data:
+                dept_obj.name = request.data["name"].strip()
+            if "description" in request.data:
+                dept_obj.description = request.data["description"].strip()
+            if "is_active" in request.data:
+                dept_obj.is_active = request.data["is_active"]
+            dept_obj.save()
+            return Response({"id": dept_obj.id, "name": dept_obj.name, "description": dept_obj.description, "is_active": dept_obj.is_active})
 
     # =====================================================
     # 🔥 ENTERPRISE DASHBOARD SUMMARY (PHASE 2)
