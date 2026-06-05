@@ -335,8 +335,41 @@ def reports_overview(request):
         months_back = 12
 
     today = date.today()
-    thirty_days_ago = today - timedelta(days=30)
+    from_date_str = request.GET.get('from_date')
+    to_date_str = request.GET.get('to_date')
+
+    if to_date_str:
+        try:
+            today = date.fromisoformat(to_date_str)
+        except ValueError:
+            pass
+
     history_start_date = today - timedelta(days=30 * months_back)
+
+    kpi_start_date = None
+
+    if from_date_str:
+        try:
+            from_date_obj = date.fromisoformat(from_date_str)
+            history_start_date = from_date_obj
+            kpi_start_date = from_date_obj
+            diff = (today.year - history_start_date.year) * 12 + (today.month - history_start_date.month) + 1
+            months_back = max(1, diff)
+        except ValueError:
+            pass
+
+    thirty_days_ago = today - timedelta(days=30)
+    
+    company_filters = {"created_at__date__lte": today}
+    user_filters = {"date_joined__date__lte": today}
+    payment_filters = {"paid_at__date__lte": today}
+    invoice_filters = {"created_at__date__lte": today}
+    
+    if kpi_start_date:
+        company_filters["created_at__date__gte"] = kpi_start_date
+        user_filters["date_joined__date__gte"] = kpi_start_date
+        payment_filters["paid_at__date__gte"] = kpi_start_date
+        invoice_filters["created_at__date__gte"] = kpi_start_date
 
     def add_months(year, month, delta):
         month_index = (year * 12 + month - 1) + delta
@@ -369,26 +402,31 @@ def reports_overview(request):
         ]
 
     # ── KPI Cards ──────────────────────────────
-    total_companies = Company.objects.count()
-    active_companies = Company.objects.filter(is_active=True).count()
-    total_users = User.objects.count()
-    total_employees = Employee.objects.count()
+    total_companies = Company.objects.filter(**company_filters).count()
+    active_companies = Company.objects.filter(is_active=True, **company_filters).count()
+    total_users = User.objects.filter(**user_filters).count()
+    total_employees = Employee.objects.filter(**company_filters).count()
 
     # New in last 30 days
-    new_companies_30d = Company.objects.filter(created_at__date__gte=thirty_days_ago).count()
-    new_users_30d = User.objects.filter(date_joined__date__gte=thirty_days_ago).count()
+    new_companies_30d = Company.objects.filter(created_at__date__gte=thirty_days_ago, created_at__date__lte=today).count()
+    new_users_30d = User.objects.filter(date_joined__date__gte=thirty_days_ago, date_joined__date__lte=today).count()
 
     # Billing
-    total_revenue = PaymentTransaction.objects.filter(payment_status="completed").aggregate(
+    total_revenue = PaymentTransaction.objects.filter(payment_status="completed", **payment_filters).aggregate(
         total=Sum("amount")
     )["total"] or 0
     revenue_30d = PaymentTransaction.objects.filter(
-        payment_status="completed", paid_at__date__gte=thirty_days_ago
+        payment_status="completed", paid_at__date__gte=thirty_days_ago, paid_at__date__lte=today
     ).aggregate(total=Sum("amount"))["total"] or 0
 
-    paid_invoices = GSTInvoice.objects.count()
-    pending_invoices = PaymentTransaction.objects.filter(payment_status="pending").count()
-    overdue_invoices = PaymentTransaction.objects.filter(payment_status="failed").count()
+    paid_invoices = GSTInvoice.objects.filter(**invoice_filters).count()
+    
+    payment_created_filters = {"created_at__date__lte": today}
+    if kpi_start_date:
+        payment_created_filters["created_at__date__gte"] = kpi_start_date
+        
+    pending_invoices = PaymentTransaction.objects.filter(payment_status="pending", **payment_created_filters).count()
+    overdue_invoices = PaymentTransaction.objects.filter(payment_status="failed", **payment_created_filters).count()
 
     # Subscriptions expiring in 30 days
     expiring_soon = Company.objects.filter(
@@ -401,7 +439,7 @@ def reports_overview(request):
     # ── Monthly growth (dynamic months) ────────────
     monthly_companies = list(
         Company.objects
-        .filter(created_at__date__gte=history_start_date)
+        .filter(created_at__date__gte=history_start_date, created_at__date__lte=today)
         .annotate(month=TruncMonth("created_at"))
         .values("month")
         .annotate(count=Count("id"))
@@ -409,7 +447,7 @@ def reports_overview(request):
     )
     monthly_users = list(
         User.objects
-        .filter(date_joined__date__gte=history_start_date)
+        .filter(date_joined__date__gte=history_start_date, date_joined__date__lte=today)
         .annotate(month=TruncMonth("date_joined"))
         .values("month")
         .annotate(count=Count("id"))
@@ -417,7 +455,7 @@ def reports_overview(request):
     )
     monthly_revenue = list(
         PaymentTransaction.objects
-        .filter(payment_status="completed", paid_at__date__gte=history_start_date)
+        .filter(payment_status="completed", paid_at__date__gte=history_start_date, paid_at__date__lte=today)
         .annotate(month=TruncMonth("paid_at"))
         .values("month")
         .annotate(total=Sum("amount"))
@@ -426,22 +464,34 @@ def reports_overview(request):
 
     # ── Users by role breakdown ────────────────
     users_by_role = list(
-        User.objects.values("role").annotate(count=Count("id")).order_by("-count")
+        User.objects.filter(**user_filters).values("role").annotate(count=Count("id")).order_by("-count")
     )
 
     # ── Top companies by employee count ───────
-    top_companies = list(
+    top_companies_qs = (
         Company.objects
         .annotate(employee_count=Count("users", filter=Q(users__role='EMPLOYEE')))
-        .filter(is_active=True)
+        .filter(is_active=True, **company_filters)
         .order_by("-employee_count")[:10]
-        .values("id", "name", "company_code", "employee_count", "subscription_period_end")
     )
+    
+    top_companies = []
+    for c in top_companies_qs:
+        sub = CompanySubscription.objects.filter(company=c, is_active=True).first()
+        plan_name = sub.subscription_plan.name if sub and sub.subscription_plan else None
+        top_companies.append({
+            "id": c.id,
+            "name": c.name,
+            "company_code": c.company_code,
+            "employee_count": c.employee_count,
+            "subscription_period_end": c.subscription_period_end.isoformat() if c.subscription_period_end else None,
+            "pricing_plan__name": plan_name,
+        })
 
     # ── Plan distribution ─────────────────────
     plan_distribution = list(
         CompanySubscription.objects
-        .filter(is_active=True)
+        .filter(is_active=True, company__created_at__date__lte=today)
         .values("subscription_plan__name")
         .annotate(count=Count("subscription_plan__name"))
         .order_by("-count")
@@ -453,7 +503,7 @@ def reports_overview(request):
     recent_payments = list(
         PaymentTransaction.objects
         .select_related("company", "subscription__subscription_plan")
-        .filter(payment_status="completed")
+        .filter(payment_status="completed", paid_at__date__lte=today, paid_at__date__gte=history_start_date)
         .order_by("-created_at")[:5]
     )
     

@@ -203,37 +203,4 @@ class LeaveRequest(models.Model):
         return f"{self.employee.employee_id} - {self.leave_type.name} ({self.status})"
 
 
-# ======================================================
-# LEAVE APPROVAL LOG (AUDIT TRAIL)
-# ======================================================
-
-class LeaveApprovalLog(models.Model):
-
-    leave_request = models.ForeignKey(
-        LeaveRequest,
-        on_delete=models.CASCADE,
-        related_name="approval_logs"
-    )
-
-    action = models.CharField(max_length=50)
-
-    performed_by = models.ForeignKey(
-        Employee,
-        on_delete=models.SET_NULL,
-        null=True
-    )
-
-    performed_at = models.DateTimeField(auto_now_add=True)
-
-    comments = models.TextField(blank=True, null=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["leave_request"]),
-        ]
-
-    def __str__(self):
-        return f"{self.leave_request.id} - {self.action}"
-    
-
 

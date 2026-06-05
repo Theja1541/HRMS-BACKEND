@@ -3,7 +3,7 @@ from django.db import transaction
 from rest_framework import status
 from apps.accounts.permissions import IsEmployee, IsHR
 from apps.employees.models import Employee
-from .models import LeaveRequest, LeaveBalance, LeaveType, LeaveApprovalLog
+from .models import LeaveRequest, LeaveBalance, LeaveType
 from .serializers import LeaveRequestSerializer, LeaveBalanceSerializer
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -194,11 +194,7 @@ def apply_leave(request):
         
     leave = LeaveRequest.objects.create(**leave_kw)
 
-    LeaveApprovalLog.objects.create(
-        leave_request=leave,
-        performed_by=employee,
-        action="APPLIED"
-    )
+
 
     return Response({"message": "Leave applied successfully"})
 
@@ -287,15 +283,7 @@ def approve_leave(request, leave_id):
     leave.approved_on = timezone.now()
     leave.save(update_fields=["status", "approved_by", "approved_on"])
 
-    LeaveApprovalLog.objects.create(
-        leave_request=leave,
-        action="APPROVED",
-        performed_by=(
-            request.user.employee_profile
-            if hasattr(request.user, "employee_profile")
-            else None
-        )
-    )
+
 
     return Response({"message": "Leave approved successfully & attendance synced"})
 
@@ -651,11 +639,7 @@ def cancel_leave(request, leave_id):
     # =========================================================
     # LOG ACTION
     # =========================================================
-    LeaveApprovalLog.objects.create(
-        leave_request=leave,
-        action="CANCELLED",
-        employee = Employee.objects.get(user=request.user)
-    )
+
 
     return Response({"message": "Leave cancelled successfully"})
 
@@ -680,15 +664,7 @@ def reject_leave(request, leave_id):
     leave.status = "REJECTED"
     leave.save(update_fields=["status"])
 
-    LeaveApprovalLog.objects.create(
-        leave_request=leave,
-        action="REJECTED",
-        performed_by=(
-            request.user.employee_profile
-            if hasattr(request.user, "employee_profile")
-            else None
-        )
-    )
+
 
     return Response({"message": "Leave rejected successfully"})
 

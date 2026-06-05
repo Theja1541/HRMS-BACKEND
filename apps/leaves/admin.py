@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import LeaveType, LeaveBalance, LeaveRequest, LeaveApprovalLog
+from .models import LeaveType, LeaveBalance, LeaveRequest
 
 
 @admin.register(LeaveType)
@@ -18,9 +18,6 @@ class LeaveRequestAdmin(admin.ModelAdmin):
     list_filter = ("status", "leave_type")
 
 
-@admin.register(LeaveApprovalLog)
-class LeaveApprovalLogAdmin(admin.ModelAdmin):
-    list_display = ("leave_request", "action", "performed_by", "performed_at")
 
 #hai frpm anilkumar
 
