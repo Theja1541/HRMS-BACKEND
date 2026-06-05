@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+from django.core.exceptions import ValidationError
 
 # ============================================================
 # TRANSACTIONAL MODELS
@@ -64,14 +65,14 @@ class FinalSettlement(models.Model):
         ('DRAFT', 'Draft'),
         ('PENDING_APPROVAL', 'Pending Approval'),
         ('APPROVED', 'Approved'),
-        ('PAID', 'Paid'),
+        ('DISBURSED', 'Disbursed'),
+        ('DISPUTED', 'Disputed'),
     )
 
     resignation = models.OneToOneField(ResignationRequest, on_delete=models.CASCADE, related_name='final_settlement')
     
-    # Earnings & Deductions Details (Payloads for breakdowns)
+    # Earnings & Deductions Details
     earnings_payload = models.JSONField(default=dict, blank=True)
-    deductions_payload = models.JSONField(default=dict, blank=True)
     
     # Aggregate Totals
     total_earnings = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
@@ -79,10 +80,43 @@ class FinalSettlement(models.Model):
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='DRAFT')
-    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_settlements')
+    approved_at = models.DateTimeField(null=True, blank=True)
+    disbursed_at = models.DateTimeField(null=True, blank=True)
+    locked = models.BooleanField(default=False)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"Final Settlement for {self.resignation.employee}"
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            orig = FinalSettlement.objects.get(pk=self.pk)
+            if orig.locked:
+                # Check if financial fields changed
+                if (orig.total_earnings != self.total_earnings or
+                    orig.total_deductions != self.total_deductions or
+                    orig.net_amount != self.net_amount or
+                    orig.earnings_payload != self.earnings_payload):
+                    raise ValidationError("Cannot modify financial fields of a locked settlement.")
+        super().save(*args, **kwargs)
+
+
+class FinalSettlementDeduction(models.Model):
+    DEDUCTION_TYPES = (
+        ('ASSET_DAMAGE', 'Asset Damage'),
+        ('ASSET_LOST', 'Asset Lost'),
+        ('LOAN', 'Loan'),
+        ('ADVANCE', 'Advance'),
+        ('OTHER', 'Other'),
+    )
+    settlement = models.ForeignKey(FinalSettlement, on_delete=models.CASCADE, related_name='deductions')
+    deduction_type = models.CharField(max_length=50, choices=DEDUCTION_TYPES)
+    asset_return = models.ForeignKey('assets.AssetReturn', null=True, blank=True, on_delete=models.SET_NULL)
+    description = models.TextField()
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+
+    def __str__(self):
+        return f"{self.get_deduction_type_display()} - {self.amount}"

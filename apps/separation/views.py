@@ -1,10 +1,17 @@
+import csv
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.utils import timezone
 from django.db import transaction
-from .models import ResignationRequest, FinalSettlement
+from django.http import HttpResponse
+
+from .models import ResignationRequest, FinalSettlement, FinalSettlementDeduction
 from .serializers import ResignationRequestSerializer, FinalSettlementSerializer
+from apps.assets.models import AssetAssignment, AssetReturn
+from .permissions import IsHRAdmin
+from .notifications import notify_ff_draft, notify_ff_approved, notify_asset_overdue
+
 
 class BaseCompanyViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
@@ -37,7 +44,6 @@ class ResignationRequestViewSet(BaseCompanyViewSet):
     def perform_create(self, serializer):
         employee = self.request.user.employee_profile
         
-        # Initialize timeline
         timeline = [{
             "event": "Resignation Submitted",
             "description": f"Resignation submitted by {employee.full_name}",
@@ -60,7 +66,6 @@ class ResignationRequestViewSet(BaseCompanyViewSet):
         remarks = request.data.get('remarks', '')
         user = request.user
 
-        # Role-based validation
         if stage == 'MANAGER' and user.role not in ['MANAGER', 'HR', 'ADMIN', 'SUPER_ADMIN']:
             return Response({'error': 'Only Managers or HR can perform Manager approvals.'}, status=403)
         if stage == 'HR' and user.role not in ['HR', 'ADMIN', 'SUPER_ADMIN']:
@@ -73,7 +78,6 @@ class ResignationRequestViewSet(BaseCompanyViewSet):
                 resignation.status = 'MANAGER_APPROVED'
             elif stage == 'HR':
                 resignation.status = 'HR_APPROVED'
-                # Deactivate user upon HR approval to block login
                 if hasattr(resignation.employee, 'user') and resignation.employee.user:
                     u = resignation.employee.user
                     u.is_active = False
@@ -82,13 +86,11 @@ class ResignationRequestViewSet(BaseCompanyViewSet):
             resignation.status = 'RELIEVED'
         else:
             resignation.status = 'REJECTED'
-            # Reactivate user in case they were previously deactivated (e.g. by an accidental HR approval)
             if hasattr(resignation.employee, 'user') and resignation.employee.user:
                 u = resignation.employee.user
                 u.is_active = True
                 u.save()
         
-        # Append to approval history
         history = list(resignation.approval_history)
         history.append({
             "stage": stage, "action": action_type, "remarks": remarks,
@@ -104,7 +106,6 @@ class ResignationRequestViewSet(BaseCompanyViewSet):
         resignation.timeline = timeline
         resignation.save()
 
-        # Handle Relieving Logic if manually triggered early
         if action_type == 'RELIEVED' or resignation.status == 'RELIEVED':
             employee_obj = resignation.employee
             employee_obj.employment_status = 'RELIEVED'
@@ -124,13 +125,107 @@ class ResignationRequestViewSet(BaseCompanyViewSet):
 
         return Response({'status': 'success', 'new_status': resignation.status})
 
+    @action(detail=True, methods=['get'], permission_classes=[IsHRAdmin])
+    def asset_clearance_status(self, request, pk=None):
+        resignation = self.get_object()
+        assignments = AssetAssignment.objects.filter(employee=resignation.employee, status='ACTIVE')
+        
+        unreturned, damaged, lost, cleared = [], [], [], []
+        total_recovery_amount = 0
+        
+        for assignment in assignments:
+            try:
+                asset_return = assignment.return_record
+                cond = asset_return.condition
+                
+                if cond == 'GOOD' or cond == 'NEEDS_REPAIR':
+                    cleared.append({'asset_id': assignment.asset.id, 'asset_name': assignment.asset.asset_name})
+                else:
+                    recovery = asset_return.recovery_amount if asset_return.recovery_amount is not None else assignment.asset.purchase_cost
+                    if recovery is None: recovery = 0
+                    total_recovery_amount += float(recovery)
+                    
+                    item = {
+                        'asset_id': assignment.asset.id, 
+                        'asset_name': assignment.asset.asset_name, 
+                        'recovery_amount': asset_return.recovery_amount, 
+                        'purchase_cost': assignment.asset.purchase_cost, 
+                        'effective_recovery': recovery
+                    }
+                    if cond == 'DAMAGED':
+                        damaged.append(item)
+                    elif cond == 'LOST':
+                        lost.append(item)
+            except Exception:
+                unreturned.append({'asset_id': assignment.asset.id, 'asset_name': assignment.asset.asset_name, 'assigned_date': assignment.assigned_date})
+                
+        return Response({
+            "clearance_blocked": len(unreturned) > 0,
+            "unreturned": unreturned,
+            "damaged": damaged,
+            "lost": lost,
+            "cleared": cleared,
+            "total_recovery_amount": total_recovery_amount
+        })
+
+    @action(detail=True, methods=['post'], permission_classes=[IsHRAdmin])
+    def generate_ff_settlement(self, request, pk=None):
+        resignation = self.get_object()
+        
+        if resignation.status not in ['APPROVED', 'HR_APPROVED']:
+            return Response({"error": "Resignation status must be APPROVED or HR_APPROVED."}, status=400)
+            
+        if not resignation.last_working_day or resignation.last_working_day > timezone.localdate():
+            return Response({"error": "Resignation last_working_day must be <= today."}, status=400)
+            
+        clearance = self.asset_clearance_status(request, pk).data
+        if clearance['clearance_blocked']:
+            override_reason = request.data.get('override_reason')
+            if not override_reason or str(override_reason).strip() == '':
+                return Response({"error": "Unreturned assets exist. override_reason required."}, status=400)
+                
+        with transaction.atomic():
+            settlement, created = FinalSettlement.objects.get_or_create(
+                resignation=resignation,
+                defaults={'status': 'DRAFT'}
+            )
+            
+            settlement.deductions.filter(deduction_type__in=['ASSET_DAMAGE', 'ASSET_LOST']).delete()
+            
+            assignments = AssetAssignment.objects.filter(employee=resignation.employee, status='ACTIVE')
+            for assignment in assignments:
+                try:
+                    ret = assignment.return_record
+                    if ret.condition in ['DAMAGED', 'LOST']:
+                        recovery = ret.recovery_amount if ret.recovery_amount is not None else assignment.asset.purchase_cost
+                        if recovery is None: recovery = 0
+                        dtype = 'ASSET_DAMAGE' if ret.condition == 'DAMAGED' else 'ASSET_LOST'
+                        FinalSettlementDeduction.objects.create(
+                            settlement=settlement,
+                            deduction_type=dtype,
+                            amount=recovery,
+                            asset_return=ret,
+                            description=f"{assignment.asset.asset_name} - {ret.get_condition_display()}"
+                        )
+                except Exception:
+                    pass
+            
+            total_deductions = sum(d.amount for d in settlement.deductions.all())
+            settlement.total_deductions = total_deductions
+            settlement.net_amount = settlement.total_earnings - settlement.total_deductions
+            settlement.save()
+            
+            notify_ff_draft(settlement)
+            
+            serializer = FinalSettlementSerializer(settlement)
+            return Response(serializer.data)
+
 
 class FinalSettlementViewSet(BaseCompanyViewSet):
     queryset = FinalSettlement.objects.all().select_related('resignation', 'resignation__company')
     serializer_class = FinalSettlementSerializer
     
     def get_queryset(self):
-        # Override to filter via the related ResignationRequest company
         company = getattr(self.request.user, 'company', None)
         if company:
             return self.queryset.filter(resignation__company=company)
@@ -141,17 +236,15 @@ class FinalSettlementViewSet(BaseCompanyViewSet):
 
     def perform_update(self, serializer):
         settlement = serializer.save()
-        # Automatically trigger relieving workflow when settlement is PAID
-        if settlement.status == 'PAID':
+        if settlement.status == 'DISBURSED':
             with transaction.atomic():
                 resignation = settlement.resignation
                 if resignation.status != 'RELIEVED':
                     resignation.status = 'RELIEVED'
                     
-                    # Append to timeline
                     timeline = list(resignation.timeline)
                     timeline.append({
-                        "event": "Settlement Paid", "description": "Final settlement processed and paid.",
+                        "event": "Settlement Disbursed", "description": "Final settlement processed and disbursed.",
                         "date": timezone.now().isoformat()
                     })
                     timeline.append({
@@ -161,7 +254,6 @@ class FinalSettlementViewSet(BaseCompanyViewSet):
                     resignation.timeline = timeline
                     resignation.save()
 
-                    # Deactivate User and Mark Employee as RELIEVED
                     employee_obj = resignation.employee
                     employee_obj.employment_status = 'RELIEVED'
                     employee_obj.save()
@@ -170,3 +262,69 @@ class FinalSettlementViewSet(BaseCompanyViewSet):
                         user_obj = employee_obj.user
                         user_obj.is_active = False
                         user_obj.save()
+
+    @action(detail=True, methods=['post'], permission_classes=[IsHRAdmin])
+    def approve(self, request, pk=None):
+        settlement = self.get_object()
+        if settlement.status not in ['DRAFT', 'PENDING_APPROVAL']:
+            return Response({"error": "Settlement status must be DRAFT or PENDING_APPROVAL."}, status=400)
+            
+        settlement.status = 'APPROVED'
+        settlement.approved_by = request.user
+        settlement.approved_at = timezone.now()
+        settlement.locked = True
+        settlement.save()
+        
+        notify_ff_approved(settlement)
+        
+        return Response({"status": "success", "message": "Settlement approved."})
+
+    @action(detail=False, methods=['get'], permission_classes=[IsHRAdmin])
+    def history(self, request):
+        qs = FinalSettlement.objects.all().select_related('resignation__employee', 'approved_by')
+        
+        dept = request.query_params.get('department')
+        if dept:
+            qs = qs.filter(resignation__employee__department_id=dept)
+            
+        status_param = request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+            
+        from_date = request.query_params.get('from_date')
+        if from_date:
+            qs = qs.filter(created_at__date__gte=from_date)
+            
+        to_date = request.query_params.get('to_date')
+        if to_date:
+            qs = qs.filter(created_at__date__lte=to_date)
+            
+        search = request.query_params.get('search')
+        if search:
+            qs = qs.filter(resignation__employee__full_name__icontains=search) | qs.filter(resignation__employee__employee_id__icontains=search)
+            
+        export = request.query_params.get('export')
+        if export == 'csv':
+            response = HttpResponse(content_type='text/csv')
+            response['Content-Disposition'] = 'attachment; filename="ff_history.csv"'
+            writer = csv.writer(response)
+            writer.writerow(['Settlement ID', 'Employee ID', 'Employee Name', 'Department', 'Designation', 'DOJ', 'LWD', 'Gross Amount', 'Total Deductions', 'Net Amount', 'Status', 'Approved By', 'Approved At', 'Disbursed At', 'Deduction Type', 'Deduction Desc', 'Deduction Amount'])
+            
+            for s in qs:
+                emp = s.resignation.employee
+                base_row = [s.id, emp.employee_id, emp.full_name, getattr(emp, 'department', ''), getattr(emp, 'designation', ''), getattr(emp, 'date_of_joining', ''), s.resignation.last_working_day, s.total_earnings, s.total_deductions, s.net_amount, s.status, s.approved_by.username if s.approved_by else '', s.approved_at, s.disbursed_at]
+                deductions = list(s.deductions.all())
+                if not deductions:
+                    writer.writerow(base_row + ['', '', ''])
+                else:
+                    for d in deductions:
+                        writer.writerow(base_row + [d.get_deduction_type_display(), d.description, d.amount])
+            return response
+            
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+            
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
