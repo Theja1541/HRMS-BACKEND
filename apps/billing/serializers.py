@@ -16,6 +16,7 @@ class SubscriptionPlanSerializer(serializers.ModelSerializer):
             "features_json",
             "razorpay_plan_id",
             "razorpay_plan_yearly_id",
+            "payment_mode",
             "is_active",
             "created_at",
             "updated_at",

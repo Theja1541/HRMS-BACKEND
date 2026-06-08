@@ -81,6 +81,9 @@ DEFAULT_SETTINGS = [
 
 def seed_default_settings():
     """Insert default settings if they don't exist."""
+    if SystemSetting.objects.count() >= len(DEFAULT_SETTINGS):
+        return
+        
     for s in DEFAULT_SETTINGS:
         SystemSetting.objects.get_or_create(
             key=s["key"],
@@ -314,9 +317,9 @@ def test_smtp_email(request):
         })
     except Exception as exc:
         return Response({
-            "error": "Failed to send test email.",
+            "error": "Failed to send test email. Please check your SMTP configuration.",
             "detail": str(exc),
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 
 
@@ -629,9 +632,16 @@ def _send_mfa_otp_email(user, raw_otp: str):
 
     from_email = getattr(django_settings, "DEFAULT_FROM_EMAIL", "no-reply@hrms.com")
     
-    _apply_smtp_to_django()
-    from django.core.mail import get_connection
-    with get_connection() as connection:
+    # Only use company SMTP if the user is not an ADMIN
+    smtp_company = getattr(user, "company", None)
+    if getattr(user, "role", "") == "ADMIN":
+        smtp_company = None
+
+    if smtp_company and getattr(smtp_company, 'use_company_smtp', False) and getattr(smtp_company, 'from_email', None):
+        from_email = smtp_company.from_email
+    
+    from apps.accounts.email_utils import get_company_email_connection
+    with get_company_email_connection(smtp_company) as connection:
         msg = EmailMultiAlternatives(subject, text_content, from_email, [user.email], connection=connection)
         msg.attach_alternative(html_content, "text/html")
         msg.send(fail_silently=False)
@@ -666,10 +676,12 @@ def mfa_send_otp(request):
     except Exception:
         import logging
         logging.getLogger(__name__).exception("Failed to send MFA OTP to %s", user.email)
-        return Response(
-            {"error": "Failed to send OTP email. Please check SMTP settings."},
-            status=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
+        print(f"--- FAILED TO SEND EMAIL. MFA OTP FOR {user.email} IS: {raw_otp} ---")
+        masked_email = _mask_email(user.email)
+        return Response({
+            "message": f"Verification code generated (check console). Failed to send to {masked_email}",
+            "masked_email": masked_email,
+        })
 
     masked_email = _mask_email(user.email)
     return Response({

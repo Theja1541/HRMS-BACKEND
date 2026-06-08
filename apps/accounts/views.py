@@ -1625,3 +1625,72 @@ def me(request):
         })
 
     return Response(data)
+
+# =========================================================
+# 🏢 COMPANY SMTP SETTINGS
+# =========================================================
+
+from apps.accounts.email_utils import encrypt_smtp_password
+
+@api_view(["GET", "PATCH"])
+@permission_classes([IsCompanyAdminOrHR])
+def company_smtp_settings(request):
+    company = getattr(request.user, "company", None)
+    if not company:
+        return Response({"error": "No company associated with user"}, status=400)
+
+    if request.method == "GET":
+        data = {
+            "use_company_smtp": company.use_company_smtp,
+            "smtp_host": company.smtp_host or "",
+            "smtp_port": company.smtp_port or 587,
+            "smtp_username": company.smtp_username or "",
+            "smtp_use_tls": company.smtp_use_tls,
+            "from_email": company.from_email or "",
+            "smtp_password_set": bool(company.smtp_password),
+        }
+        return Response(data)
+
+    elif request.method == "PATCH":
+        company.use_company_smtp = request.data.get("use_company_smtp", company.use_company_smtp)
+        company.smtp_host = request.data.get("smtp_host", company.smtp_host)
+        if "smtp_port" in request.data:
+            company.smtp_port = request.data["smtp_port"]
+        company.smtp_username = request.data.get("smtp_username", company.smtp_username)
+        company.smtp_use_tls = request.data.get("smtp_use_tls", company.smtp_use_tls)
+        company.from_email = request.data.get("from_email", company.from_email)
+        
+        new_password = request.data.get("smtp_password")
+        if new_password:
+            company.smtp_password = encrypt_smtp_password(new_password)
+            
+        company.save()
+        log_action(request, "UPDATE", "Company", object_id=company.id, description="Updated Company SMTP settings", company=company)
+        return Response({"message": "Settings updated successfully"})
+
+@api_view(["POST"])
+@permission_classes([IsCompanyAdminOrHR])
+def company_smtp_test(request):
+    company = getattr(request.user, "company", None)
+    if not company:
+        return Response({"error": "No company associated with user"}, status=400)
+    
+    to_email = request.data.get("to_email")
+    if not to_email:
+        return Response({"error": "to_email is required"}, status=400)
+        
+    from django.core.mail import EmailMultiAlternatives
+    from apps.accounts.email_utils import get_company_email_connection
+    
+    subject = "Test SMTP Settings"
+    text_content = "Your company-specific SMTP configuration works perfectly."
+    from_email = company.from_email or "no-reply@company.com"
+    
+    try:
+        connection = get_company_email_connection(company)
+        msg = EmailMultiAlternatives(subject, text_content, from_email, [to_email], connection=connection)
+        msg.send(fail_silently=False)
+        return Response({"message": "Test email sent successfully"})
+    except Exception as exc:
+        return Response({"error": f"Failed to send test email. Please check your SMTP configuration.", "detail": str(exc)}, status=400)
+

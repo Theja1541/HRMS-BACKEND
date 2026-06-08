@@ -34,6 +34,8 @@ from .views import (
     change_password_with_old,
     forgot_password,
     logout_view,
+    company_smtp_settings,
+    company_smtp_test,
 )
 from apps.superadmin.views import monthly_growth_analytics
 
@@ -70,6 +72,9 @@ urlpatterns = [
 
     path("companies/<int:company_id>/activate/", company_activate),  # POST activate
     path("companies/<int:company_id>/hard-delete/", company_hard_delete),  # DELETE permanent
+
+    path("company/smtp/", company_smtp_settings, name="company-smtp-settings"),
+    path("company/smtp/test-email/", company_smtp_test, name="company-smtp-test"),
 
     path("profile/", employee_profile, name="employee-profile"),
     path("analytics/", superadmin_analytics, name="analytics"),

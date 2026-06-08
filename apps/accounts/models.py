@@ -103,6 +103,15 @@ class Company(models.Model):
     min_password_length = models.IntegerField(default=8, help_text="Minimum characters required for passwords.")
     password_expiry_days = models.IntegerField(default=90, help_text="Force password reset after this many days (0 = never).")
     require_mfa = models.BooleanField(default=False, help_text="Enforce Multi-Factor Authentication for all users.")
+    
+    # SMTP Settings
+    use_company_smtp = models.BooleanField(default=False, help_text="Use company-specific SMTP settings instead of global defaults.")
+    smtp_host = models.CharField(max_length=255, blank=True, null=True)
+    smtp_port = models.IntegerField(default=587)
+    smtp_username = models.CharField(max_length=255, blank=True, null=True)
+    smtp_password = models.CharField(max_length=1000, blank=True, null=True, help_text="Encrypted SMTP password")
+    smtp_use_tls = models.BooleanField(default=True)
+    from_email = models.CharField(max_length=255, blank=True, null=True)
 
     is_active = models.BooleanField(default=True, db_index=True)
     billing_action_stopped = models.BooleanField(default=False, db_index=True)
