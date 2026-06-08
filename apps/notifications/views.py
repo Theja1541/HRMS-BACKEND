@@ -89,7 +89,14 @@ def _send_notification_email(recipient, title, message, notif_type):
         subject, text_body, html_body = _build_notification_email(
             recipient, title, message, notif_type
         )
-        msg = EmailMultiAlternatives(subject, text_body, from_email, [recipient.email])
+        company = getattr(recipient, "company", None)
+        if company and getattr(company, 'use_company_smtp', False) and getattr(company, 'from_email', None):
+            from_email = company.from_email
+            
+        from apps.accounts.email_utils import get_company_email_connection
+        connection = get_company_email_connection(company)
+        
+        msg = EmailMultiAlternatives(subject, text_body, from_email, [recipient.email], connection=connection)
         msg.attach_alternative(html_body, "text/html")
         msg.send(fail_silently=False)
     except Exception:

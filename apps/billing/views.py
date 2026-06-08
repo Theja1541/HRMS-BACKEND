@@ -58,33 +58,36 @@ def pricing_plan_list_create(request):
             monthly_total = plan.monthly_price * (1 + gst_percentage / 100)
             yearly_total = plan.yearly_price * (1 + gst_percentage / 100)
 
-            # 2. Synchronize with Razorpay (Create Monthly & Yearly Plans)
-            rzp_service = RazorpayService()
-            
-            try:
-                rzp_monthly_plan_id = rzp_service.create_razorpay_plan(
-                    name=f"{plan.name} - Monthly",
-                    price_inr=monthly_total,
-                    period="monthly",
-                    description=plan.description or f"Monthly subscription for {plan.name}"
-                )
+            payment_mode = request.data.get("payment_mode", "online")
+
+            # 2. Synchronize with Razorpay if online plan
+            if payment_mode == "online":
+                rzp_service = RazorpayService()
                 
-                rzp_yearly_plan_id = rzp_service.create_razorpay_plan(
-                    name=f"{plan.name} - Yearly",
-                    price_inr=yearly_total,
-                    period="yearly",
-                    description=plan.description or f"Yearly subscription for {plan.name}"
-                )
-                
-                # Save Razorpay Plan IDs inside our model
-                plan.razorpay_plan_id = rzp_monthly_plan_id
-                plan.razorpay_plan_yearly_id = rzp_yearly_plan_id
-                plan.save(update_fields=["razorpay_plan_id", "razorpay_plan_yearly_id"])
-                
-            except Exception as rzp_error:
-                logger.error(f"Razorpay plan creation failed: {str(rzp_error)}")
-                # Database transaction will roll back automatically due to transaction.atomic()
-                raise ValueError(f"Razorpay plan synchronization failed: {str(rzp_error)}")
+                try:
+                    rzp_monthly_plan_id = rzp_service.create_razorpay_plan(
+                        name=f"{plan.name} - Monthly",
+                        price_inr=monthly_total,
+                        period="monthly",
+                        description=plan.description or f"Monthly subscription for {plan.name}"
+                    )
+                    
+                    rzp_yearly_plan_id = rzp_service.create_razorpay_plan(
+                        name=f"{plan.name} - Yearly",
+                        price_inr=yearly_total,
+                        period="yearly",
+                        description=plan.description or f"Yearly subscription for {plan.name}"
+                    )
+                    
+                    # Save Razorpay Plan IDs inside our model
+                    plan.razorpay_plan_id = rzp_monthly_plan_id
+                    plan.razorpay_plan_yearly_id = rzp_yearly_plan_id
+                    plan.save(update_fields=["razorpay_plan_id", "razorpay_plan_yearly_id"])
+                    
+                except Exception as rzp_error:
+                    logger.error(f"Razorpay plan creation failed: {str(rzp_error)}")
+                    # Database transaction will roll back automatically due to transaction.atomic()
+                    raise ValueError(f"Razorpay plan synchronization failed: {str(rzp_error)}")
 
             return Response(SubscriptionPlanSerializer(plan).data, status=status.HTTP_201_CREATED)
 
@@ -162,20 +165,22 @@ def assign_plan_to_company(request, company_id):
             gst_amount = (base_amount * plan.gst_percentage) / 100
             total_amount = base_amount + gst_amount
             
+            payment_method = request.data.get("payment_method", "manual")
+
             pay_transaction = PaymentTransaction.objects.create(
                 company=company,
                 subscription=subscription,
                 razorpay_order_id=f"man_ord_{company.company_code}_{int(timezone.now().timestamp())}",
                 razorpay_payment_id=f"man_pay_{int(timezone.now().timestamp())}",
-                razorpay_signature="manual_admin_assign",
+                razorpay_signature=f"manual_admin_assign_{payment_method}",
                 amount=base_amount,
                 gst_amount=gst_amount,
                 total_amount=total_amount,
                 currency="INR",
-                payment_method="manual",
+                payment_method=payment_method,
                 payment_status=PaymentTransaction.STATUS_COMPLETED,
                 paid_at=timezone.now(),
-                failure_reason="Assigned by Super Admin"
+                failure_reason=f"Assigned by Super Admin ({payment_method})"
             )
             
             # 3. Generate a GST Invoice PDF

@@ -133,11 +133,20 @@ def send_temporary_password_email(user, temp_password, purpose, recipient_name=N
         recipient_name=recipient_name,
     )
 
+    company = getattr(user, "company", None)
+    from_email = settings.DEFAULT_FROM_EMAIL
+    if company and getattr(company, 'use_company_smtp', False) and getattr(company, 'from_email', None):
+        from_email = company.from_email
+        
+    from apps.accounts.email_utils import get_company_email_connection
+    connection = get_company_email_connection(company)
+
     email_message = EmailMultiAlternatives(
         subject=subject,
         body=text_content,
-        from_email=settings.DEFAULT_FROM_EMAIL,
+        from_email=from_email,
         to=[user.email],
+        connection=connection,
     )
     email_message.attach_alternative(html_content, "text/html")
     email_message.send(fail_silently=False)

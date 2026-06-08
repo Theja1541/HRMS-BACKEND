@@ -129,13 +129,21 @@ class EmailService:
 
         # Send with retries (up to 3 times)
         max_retries = 3
+        
+        from_email = settings.DEFAULT_FROM_EMAIL
+        if company and getattr(company, 'use_company_smtp', False) and getattr(company, 'from_email', None):
+            from_email = company.from_email
+        from apps.accounts.email_utils import get_company_email_connection
+        connection = get_company_email_connection(company)
+        
         for attempt in range(1, max_retries + 1):
             try:
                 msg = EmailMultiAlternatives(
                     subject=subject,
                     body=text_body,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    from_email=from_email,
                     to=[to_email],
+                    connection=connection,
                 )
                 msg.attach_alternative(html_body, "text/html")
                 

@@ -24,6 +24,7 @@ class FinalSettlementDeductionSerializer(serializers.ModelSerializer):
 class FinalSettlementSerializer(serializers.ModelSerializer):
     deductions = FinalSettlementDeductionSerializer(many=True, read_only=True)
     approved_by_name = serializers.SerializerMethodField()
+    resignation_details = ResignationRequestSerializer(source='resignation', read_only=True)
 
     class Meta:
         model = FinalSettlement

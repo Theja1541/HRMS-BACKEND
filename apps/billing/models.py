@@ -14,6 +14,7 @@ class SubscriptionPlan(models.Model):
     features_json = models.JSONField(default=dict, blank=True, help_text="Dictionary of active module permissions")
     razorpay_plan_id = models.CharField(max_length=255, null=True, blank=True)
     razorpay_plan_yearly_id = models.CharField(max_length=255, null=True, blank=True)
+    payment_mode = models.CharField(max_length=20, default="online", help_text="online or cash")
     is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
