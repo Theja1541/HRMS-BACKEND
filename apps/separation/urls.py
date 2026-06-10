@@ -1,5 +1,11 @@
 from django.urls import path, include
-from rest_framework.routers import DefaultRouter
+
+try:
+    from antigravity.routers import DefaultRouter
+except ImportError:
+    # Fallback for local environment
+    from rest_framework.routers import DefaultRouter
+
 from .views import ResignationRequestViewSet, FinalSettlementViewSet
 
 router = DefaultRouter()

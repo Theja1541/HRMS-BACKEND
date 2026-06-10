@@ -85,6 +85,11 @@ class FinalSettlement(models.Model):
     disbursed_at = models.DateTimeField(null=True, blank=True)
     locked = models.BooleanField(default=False)
     
+    # --- NEW ---
+    notice_period_shortfall_days = models.PositiveIntegerField(default=0)
+    # --- NEW ---
+    notice_shortfall_snapshot = models.JSONField(default=dict, blank=True)
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

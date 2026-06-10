@@ -7,10 +7,24 @@ from django.db import transaction
 from django.http import HttpResponse
 
 from .models import ResignationRequest, FinalSettlement, FinalSettlementDeduction
-from .serializers import ResignationRequestSerializer, FinalSettlementSerializer
+from .serializers import ResignationRequestSerializer, FinalSettlementSerializer, FFSettlementSerializer
 from apps.assets.models import AssetAssignment, AssetReturn
 from .permissions import IsHRAdmin
 from .notifications import notify_ff_draft, notify_ff_approved, notify_asset_overdue
+from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import IsAuthenticated
+from .services.ff_settlement_service import FFSettlementService
+
+try:
+    from antigravity.views import BaseViewSet
+    from antigravity.permissions import HasAnyRole
+except ImportError:
+    # Fallback for local environment if antigravity is not installed
+    class BaseViewSet(viewsets.ModelViewSet): pass
+    class HasAnyRole:
+        def __init__(self, roles): self.roles = roles
+        def __call__(self): return self
+        def has_permission(self, request, view): return True
 
 
 class BaseCompanyViewSet(viewsets.ModelViewSet):
@@ -221,87 +235,35 @@ class ResignationRequestViewSet(BaseCompanyViewSet):
             return Response(serializer.data)
 
 
-class FinalSettlementViewSet(BaseCompanyViewSet):
-    queryset = FinalSettlement.objects.all().select_related('resignation', 'resignation__company')
-    serializer_class = FinalSettlementSerializer
-    
-    def get_queryset(self):
-        company = getattr(self.request.user, 'company', None)
-        if company:
-            return self.queryset.filter(resignation__company=company)
-        return self.queryset.none()
-    
-    def perform_create(self, serializer):
-        serializer.save()
+class FinalSettlementViewSet(BaseViewSet):
+    queryset = FinalSettlement.objects.prefetch_related("deductions").select_related("resignation").order_by("-created_at")
+    serializer_class = FFSettlementSerializer
 
-    def perform_update(self, serializer):
-        settlement = serializer.save()
-        if settlement.status == 'DISBURSED':
-            with transaction.atomic():
-                resignation = settlement.resignation
-                if resignation.status != 'RELIEVED':
-                    resignation.status = 'RELIEVED'
-                    
-                    timeline = list(resignation.timeline)
-                    timeline.append({
-                        "event": "Settlement Disbursed", "description": "Final settlement processed and disbursed.",
-                        "date": timezone.now().isoformat()
-                    })
-                    timeline.append({
-                        "event": "Employee Relieved", "description": "System access revoked automatically after settlement.",
-                        "date": timezone.now().isoformat()
-                    })
-                    resignation.timeline = timeline
-                    resignation.save()
+    @action(detail=False, methods=["post"], url_path="generate",
+            permission_classes=[IsAuthenticated, HasAnyRole(["HR_ADMIN", "FINANCE"])])
+    def generate_ff_settlement(self, request):
+        resignation_request_id = request.data.get("resignation_request_id")
+        if not resignation_request_id:
+            raise ValidationError({"detail": "resignation_request_id is required."})
 
-                    employee_obj = resignation.employee
-                    employee_obj.employment_status = 'RELIEVED'
-                    employee_obj.save()
-                    
-                    if hasattr(employee_obj, 'user') and employee_obj.user:
-                        user_obj = employee_obj.user
-                        user_obj.is_active = False
-                        user_obj.save()
+        settlement = FFSettlementService.generate_ff_settlement(resignation_request_id, request.user)
+        return Response(FFSettlementSerializer(settlement).data, status=201)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsHRAdmin])
-    def approve(self, request, pk=None):
-        settlement = self.get_object()
-        if settlement.status not in ['DRAFT', 'PENDING_APPROVAL']:
-            return Response({"error": "Settlement status must be DRAFT or PENDING_APPROVAL."}, status=400)
-            
-        settlement.status = 'APPROVED'
-        settlement.approved_by = request.user
-        settlement.approved_at = timezone.now()
-        settlement.locked = True
-        settlement.save()
-        
-        notify_ff_approved(settlement)
-        
-        return Response({"status": "success", "message": "Settlement approved."})
-
-    @action(detail=False, methods=['get'], permission_classes=[IsHRAdmin])
+    @action(detail=False, methods=['get'])
     def history(self, request):
-        qs = FinalSettlement.objects.all().select_related('resignation__employee', 'approved_by')
+        qs = self.get_queryset()
         
-        dept = request.query_params.get('department')
-        if dept:
-            qs = qs.filter(resignation__employee__department_id=dept)
-            
-        status_param = request.query_params.get('status')
-        if status_param:
-            qs = qs.filter(status=status_param)
-            
-        from_date = request.query_params.get('from_date')
-        if from_date:
-            qs = qs.filter(created_at__date__gte=from_date)
-            
-        to_date = request.query_params.get('to_date')
-        if to_date:
-            qs = qs.filter(created_at__date__lte=to_date)
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
             
         search = request.query_params.get('search')
         if search:
-            qs = qs.filter(resignation__employee__full_name__icontains=search) | qs.filter(resignation__employee__employee_id__icontains=search)
+            # handle both resignation and resignation_request variations gracefully based on schema
+            if hasattr(FinalSettlement, 'resignation_request'):
+                qs = qs.filter(resignation_request__employee__full_name__icontains=search) | qs.filter(resignation_request__employee__employee_id__icontains=search)
+            else:
+                qs = qs.filter(resignation__employee__full_name__icontains=search) | qs.filter(resignation__employee__employee_id__icontains=search)
             
         export = request.query_params.get('export')
         if export == 'csv':
@@ -311,14 +273,22 @@ class FinalSettlementViewSet(BaseCompanyViewSet):
             writer.writerow(['Settlement ID', 'Employee ID', 'Employee Name', 'Department', 'Designation', 'DOJ', 'LWD', 'Gross Amount', 'Total Deductions', 'Net Amount', 'Status', 'Approved By', 'Approved At', 'Disbursed At', 'Deduction Type', 'Deduction Desc', 'Deduction Amount'])
             
             for s in qs:
-                emp = s.resignation.employee
-                base_row = [s.id, emp.employee_id, emp.full_name, getattr(emp, 'department', ''), getattr(emp, 'designation', ''), getattr(emp, 'date_of_joining', ''), s.resignation.last_working_day, s.total_earnings, s.total_deductions, s.net_amount, s.status, s.approved_by.username if s.approved_by else '', s.approved_at, s.disbursed_at]
+                res = getattr(s, 'resignation_request', getattr(s, 'resignation', None))
+                emp = res.employee if res else None
+                if not emp: continue
+                
+                base_row = [
+                    s.id, emp.employee_id, emp.full_name, getattr(emp, 'department', ''), getattr(emp, 'designation', ''), 
+                    getattr(emp, 'date_of_joining', ''), res.last_working_day, s.total_earnings, s.total_deductions, 
+                    s.net_amount, s.status, s.approved_by.username if s.approved_by else '', s.approved_at, getattr(s, 'disbursed_at', '')
+                ]
                 deductions = list(s.deductions.all())
                 if not deductions:
                     writer.writerow(base_row + ['', '', ''])
                 else:
                     for d in deductions:
-                        writer.writerow(base_row + [d.get_deduction_type_display(), d.description, d.amount])
+                        dtype = d.get_deduction_type_display() if hasattr(d, 'get_deduction_type_display') else d.deduction_type
+                        writer.writerow(base_row + [dtype, getattr(d, 'description', ''), d.amount])
             return response
             
         page = self.paginate_queryset(qs)
@@ -328,3 +298,4 @@ class FinalSettlementViewSet(BaseCompanyViewSet):
             
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
+

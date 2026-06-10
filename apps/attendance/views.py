@@ -55,6 +55,7 @@ from apps.payroll.utils.payroll_helpers import (
     is_payroll_closed,
     is_super_admin,
 )
+from apps.payroll.utils.sync_payslip import sync_attendance_with_payslip
 from django.db import transaction
 
 # ============================================================
@@ -113,10 +114,7 @@ def calculate_working_days(year, month, employee=None):
                 continue
 
         # Weekend logic
-        if employee and employee.work_calendar:
-            weekend_days = employee.work_calendar.weekend_days
-        else:
-            weekend_days = [6]  # Default Sunday
+        weekend_days = [6]  # Default Sunday
 
         if current_date.weekday() in weekend_days:
             continue
@@ -619,6 +617,8 @@ def mark_attendance(request):
 
     attendance.save()
 
+    sync_attendance_with_payslip(employee, parsed_date.year, parsed_date.month)
+
     return Response(
         {
             "message": "Attendance marked successfully",
@@ -713,6 +713,8 @@ def bulk_mark_attendance(request):
             updated_count += 1
         else:
             created_count += 1
+
+        sync_attendance_with_payslip(emp, parsed_date.year, parsed_date.month)
 
     return Response(
         {
