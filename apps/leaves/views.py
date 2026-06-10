@@ -21,14 +21,10 @@ from django.utils.timezone import now
 from decimal import Decimal
 
 def get_prorated_quota(employee, leave_type, year):
-    quota = leave_type.annual_quota
-    if leave_type.prorate_for_new_joiners and getattr(employee, 'joining_date', None):
-        if employee.joining_date.year == year:
-            months_remaining = 12 - employee.joining_date.month + 1
-            quota = (quota / Decimal("12.0")) * Decimal(str(months_remaining))
-            # Round to 2 decimal places
-            quota = quota.quantize(Decimal("0.01"))
-    return quota
+    # The admin requested that the assigned days strictly match the allocated days.
+    # Therefore, we return the annual_quota without prorating to avoid confusion.
+    quota = Decimal(str(leave_type.annual_quota))
+    return quota.quantize(Decimal("0.01"))
 
 @api_view(["POST"])
 @permission_classes([IsEmployee])

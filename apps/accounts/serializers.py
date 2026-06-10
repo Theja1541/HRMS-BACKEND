@@ -76,16 +76,22 @@ class CompanySerializer(serializers.ModelSerializer):
         return None
 
     def _latest_subscription(self, company):
-        try:
-            from apps.billing.models import CompanySubscription
-            return (
-                CompanySubscription.objects.select_related("subscription_plan")
-                .filter(company=company)
-                .order_by("-created_at")
-                .first()
-            )
-        except Exception:
-            return None
+        if not hasattr(company, "_cached_subscription"):
+            try:
+                # If prefetched via select_related
+                if hasattr(company, "subscription") and getattr(company, "subscription", None) is not None:
+                    company._cached_subscription = company.subscription
+                else:
+                    from apps.billing.models import CompanySubscription
+                    company._cached_subscription = (
+                        CompanySubscription.objects.select_related("subscription_plan")
+                        .filter(company=company)
+                        .order_by("-created_at")
+                        .first()
+                    )
+            except Exception:
+                company._cached_subscription = None
+        return company._cached_subscription
 
     def get_pricing_plan_id(self, obj):
         s = self._latest_subscription(obj)
@@ -108,7 +114,12 @@ class CompanySerializer(serializers.ModelSerializer):
         return None
 
     def _get_admin_user(self, obj):
-        return User.objects.filter(company=obj, role="ADMIN").first()
+        if not hasattr(obj, "_cached_admin_user"):
+            if hasattr(obj, "prefetched_admin_users"):
+                obj._cached_admin_user = obj.prefetched_admin_users[0] if obj.prefetched_admin_users else None
+            else:
+                obj._cached_admin_user = User.objects.filter(company=obj, role="ADMIN").first()
+        return obj._cached_admin_user
 
     def get_admin_email(self, obj):
         u = self._get_admin_user(obj)
@@ -141,8 +152,7 @@ class CreateUserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "username", "email", "password", "role", "first_name", "last_name", "hr_permissions",
-            "phone", "employee_id", "profile_photo", "resume", "offer_letter", "aadhar_card", "pan_card",
-            "address_proof", "education_certificate", "experience_certificate", "hr_details"
+            "phone"
         ]
 
     def validate(self, attrs):
@@ -235,18 +245,8 @@ class UserSerializer(serializers.ModelSerializer):
             "is_active",
             "date_joined",
             "hr_permissions",
-            "employee_id",
-            "profile_photo",
-            "resume",
-            "offer_letter",
-            "aadhar_card",
-            "pan_card",
-            "address_proof",
-            "education_certificate",
-            "experience_certificate",
             "failed_attempts",
             "last_login",
-            "hr_details",
         ]
 
     def get_company_name(self, obj):
@@ -336,7 +336,7 @@ class LoginSerializer(serializers.Serializer):
                 pass
                 
             raise serializers.ValidationError(
-                {"detail": "User is inactive"}
+                {"detail": "Your account is deactivated please contact Admin."}
             )
 
         try:

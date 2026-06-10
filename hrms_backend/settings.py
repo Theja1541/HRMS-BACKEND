@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     "apps.support.apps.SupportConfig",
     "apps.superadmin.apps.SuperadminConfig",
     "apps.separation.apps.SeparationConfig",
+    "apps.projects",
 ]
 
 MIDDLEWARE = [
@@ -258,6 +259,10 @@ CELERY_BEAT_SCHEDULE = {
     "credit-annual-leaves": {
         "task": "apps.leaves.tasks.credit_annual_leaves_task",
         "schedule": crontab(month_of_year=1, day_of_month=1, hour=0, minute=0),
+    },
+    "project-deadline-notifications": {
+        "task": "apps.projects.tasks.check_project_deadlines",
+        "schedule": crontab(hour=1, minute=0), # Run daily at 1 AM
     },
 }
 

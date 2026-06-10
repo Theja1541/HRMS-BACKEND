@@ -41,25 +41,12 @@ class User(AbstractUser):
     billing_action_stopped = models.BooleanField(default=False, db_index=True)
 
     # Dynamic JSON Configurations
-    departments = models.JSONField(default=list, blank=True)
-    custom_roles = models.JSONField(default=list, blank=True)
-    work_calendar = models.JSONField(default=dict, blank=True)
     hr_permissions = models.JSONField(default=dict, blank=True, null=True)
-    hr_details = models.JSONField(default=dict, blank=True, null=True)
     failed_attempts = models.IntegerField(default=0)
     is_locked = models.BooleanField(default=False, db_index=True)
     locked_at = models.DateTimeField(null=True, blank=True)
 
-    # Enterprise HR Details and Onboarding Documents
-    employee_id = models.CharField(max_length=50, blank=True, null=True)
-    profile_photo = models.ImageField(upload_to="hr/photos/", blank=True, null=True)
-    resume = models.FileField(upload_to="hr/documents/", blank=True, null=True)
-    offer_letter = models.FileField(upload_to="hr/documents/", blank=True, null=True)
-    aadhar_card = models.FileField(upload_to="hr/documents/", blank=True, null=True)
-    pan_card = models.FileField(upload_to="hr/documents/", blank=True, null=True)
-    address_proof = models.FileField(upload_to="hr/documents/", blank=True, null=True)
-    education_certificate = models.FileField(upload_to="hr/documents/", blank=True, null=True)
-    experience_certificate = models.FileField(upload_to="hr/documents/", blank=True, null=True)
+
 
     def __str__(self):
         return f"{self.username} ({self.role})"
@@ -77,6 +64,7 @@ def default_enabled_modules():
         "billing": True,
         "daybook": True,
         "holidays": True,
+        "projects": True,
     }
 
 class Company(models.Model):

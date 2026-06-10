@@ -65,10 +65,18 @@ urlpatterns = [
     path("api/holidays/", include("apps.holidays.urls")),
     path("api/superadmin/", include("apps.superadmin.urls")),
     path("api/separation/", include("apps.separation.urls")),
+    path("api/projects/", include("apps.projects.urls")),
 
     path("api/accounts/token/refresh/", custom_token_refresh),
 ]
 
+from django.urls import re_path
+from django.views.static import serve
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+else:
+    # Serve media files locally even if DEBUG=False for testing
+    urlpatterns += [
+        re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
+    ]

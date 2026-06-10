@@ -55,13 +55,13 @@ def calculate_lop_for_month(employee, year, month):
             current += timedelta(days=1)
 
     # ==========================================
-    # 3️⃣ Absent attendance (exclude holidays)
+    # 3️⃣ Absent and Unpaid Leave attendance (exclude holidays)
     # ==========================================
     absents = Attendance.objects.filter(
         employee=employee,
         date__year=year,
         date__month=month,
-        status="ABSENT"
+        status__in=["ABSENT", "UNPAID_LEAVE"]
     )
 
     for record in absents:

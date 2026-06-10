@@ -13,13 +13,40 @@ class ResignationRequestSerializer(serializers.ModelSerializer):
         read_only_fields = ('company', 'employee', 'status', 'last_working_day', 'submitted_on')
 
 
-class FinalSettlementDeductionSerializer(serializers.ModelSerializer):
-    deduction_type_display = serializers.CharField(source='get_deduction_type_display', read_only=True)
+try:
+    from antigravity.serializers import BaseModelSerializer
+except ImportError:
+    # fallback in case it's not installed in the local environment
+    class BaseModelSerializer(serializers.ModelSerializer):
+        pass
+
+class FinalSettlementDeductionSerializer(BaseModelSerializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, coerce_to_string=True)
 
     class Meta:
         model = FinalSettlementDeduction
-        fields = ('id', 'deduction_type', 'deduction_type_display', 'asset_return_id', 'description', 'amount')
+        fields = ('id', 'deduction_type', 'description', 'amount', 'asset_return_id')
 
+class FFSettlementSerializer(BaseModelSerializer):
+    total_earnings = serializers.DecimalField(max_digits=12, decimal_places=2, coerce_to_string=True)
+    total_deductions = serializers.DecimalField(max_digits=12, decimal_places=2, coerce_to_string=True)
+    net_amount = serializers.DecimalField(max_digits=12, decimal_places=2, coerce_to_string=True)
+    
+    notice_period_shortfall_days = serializers.IntegerField(read_only=True)
+    notice_shortfall_snapshot = serializers.JSONField(read_only=True)
+    deductions = FinalSettlementDeductionSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = FinalSettlement
+        # As per the prompt: fields: id, resignation_request_id, total_earnings, total_deductions, net_amount, status, earnings_payload, locked, notice_period_shortfall_days, notice_shortfall_snapshot, deductions, created_at, updated_at
+        fields = (
+            'id', 'resignation_request_id', 'total_earnings', 'total_deductions', 'net_amount',
+            'status', 'earnings_payload', 'locked', 'notice_period_shortfall_days',
+            'notice_shortfall_snapshot', 'deductions', 'created_at', 'updated_at'
+        )
+        
+    # Property fallback just in case model uses 'resignation' instead of 'resignation_request'
+    resignation_request_id = serializers.IntegerField(source='resignation.id', read_only=True)
 
 class FinalSettlementSerializer(serializers.ModelSerializer):
     deductions = FinalSettlementDeductionSerializer(many=True, read_only=True)
@@ -33,7 +60,6 @@ class FinalSettlementSerializer(serializers.ModelSerializer):
 
     def get_approved_by_name(self, obj):
         if obj.approved_by:
-            # Assumes User model has get_full_name() or similar, fallback to username
             return getattr(obj.approved_by, 'get_full_name', lambda: obj.approved_by.username)()
         return None
 

@@ -178,12 +178,7 @@ class Employee(models.Model):
             blank=True
         )
 
-    work_calendar = models.ForeignKey(
-    "attendance.WorkCalendar",
-    on_delete=models.SET_NULL,
-    null=True,
-    blank=True
-)
+
 
 
     is_work_from_home = models.BooleanField(default=False)

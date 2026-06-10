@@ -975,8 +975,18 @@ def superadmin_analytics(request):
 @permission_classes([IsSuperAdmin])
 def company_list(request):
     is_active = request.query_params.get("is_active")
+    
+    from django.db.models import Prefetch
+    admin_users_prefetch = Prefetch(
+        "users",
+        queryset=User.objects.filter(role="ADMIN"),
+        to_attr="prefetched_admin_users"
+    )
+
     qs = (
         Company.objects.annotate(employee_count=Count("users", filter=Q(users__role='EMPLOYEE')))
+        .select_related("subscription", "subscription__subscription_plan")
+        .prefetch_related(admin_users_prefetch)
         .order_by("name")
     )
     if is_active is not None:
